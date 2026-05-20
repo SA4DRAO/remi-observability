@@ -5,7 +5,7 @@ import type { Express } from 'express';
 import cors from 'cors';
 
 import { loadConfig, validateConfig } from './config';
-import { Logger, RedisService, DatabaseService } from './services';
+import { Logger, DatabaseService } from './services';
 import { createErrorHandler, createRequestLogger } from './middleware';
 import { createHealthRoutes, createEventsRoutes, createSessionsRoutes, createTracesRoutes, createAnalyticsRoutes } from './routes';
 
@@ -22,7 +22,6 @@ try {
 const logger = new Logger(config.logLevel);
 
 // Service instances — populated during initialization
-let redisService: RedisService | null = null;
 let databaseService: DatabaseService | null = null;
 
 // Middleware
@@ -34,14 +33,7 @@ app.use(createRequestLogger(logger));
 // Routes
 app.use('/', createHealthRoutes());
 app.use('/api/v1/sessions', createSessionsRoutes(() => databaseService, logger));
-app.use(
-  '/api/v1/events',
-  createEventsRoutes(
-    () => databaseService,
-    () => redisService,
-    logger
-  )
-);
+app.use('/api/v1/events', createEventsRoutes(() => databaseService, logger));
 app.use(
   '/api/v1/traces',
   createTracesRoutes(() => databaseService, logger)
@@ -68,14 +60,6 @@ async function gracefulShutdown(signal: string): Promise<void> {
   server.close(async () => {
     logger.info('HTTP server closed');
 
-    if (redisService) {
-      try {
-        await redisService.disconnect();
-      } catch (error) {
-        logger.error('Error closing Redis:', error);
-      }
-    }
-
     if (databaseService) {
       try {
         await databaseService.disconnect();
@@ -101,14 +85,6 @@ process.on('unhandledRejection', (reason) => logger.error('Unhandled promise rej
 process.on('uncaughtException', (err) => { logger.error('Uncaught exception:', err); process.exit(1); });
 
 async function initializeServices(): Promise<void> {
-  redisService = new RedisService(logger);
-  try {
-    await redisService.initialize();
-  } catch (error) {
-    logger.warn('Redis initialization failed, continuing without it:', error);
-    redisService = null;
-  }
-
   databaseService = new DatabaseService(logger);
   try {
     await databaseService.initialize();
@@ -117,9 +93,7 @@ async function initializeServices(): Promise<void> {
     databaseService = null;
   }
 
-  logger.info(
-    `Services: Redis=${!!redisService}, DB=${!!databaseService}`
-  );
+  logger.info(`Services: DB=${!!databaseService}`);
 }
 
 const server = app.listen(config.port, config.host, () => {

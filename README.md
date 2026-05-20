@@ -12,8 +12,6 @@ Remi is built with:
 [![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?logo=typescript&logoColor=white)](remi-backend/)
 [![React](https://img.shields.io/badge/-React-61DAFB?logo=react&logoColor=black)](remi/remi/)
 [![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?logo=postgresql&logoColor=white)](scripts/init-db.sql)
-[![Redis](https://img.shields.io/badge/-Redis-DC382D?logo=redis&logoColor=white)](docker-compose.yml)
-
 ---
 
 ## Index
@@ -82,7 +80,6 @@ Remi is built with:
 | Dashboard UI    | 3000      | Observability frontend           |
 | Backend API     | 3100      | REST API + OTLP ingest           |
 | Postgres        | 5432      | Session and trace storage        |
-| Redis           | 6379      | Cache layer                      |
 | Jaeger UI       | 16686     | Distributed trace viewer         |
 | OTel Collector  | 4318      | OTLP HTTP receiver               |
 

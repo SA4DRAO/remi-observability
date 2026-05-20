@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { DatabaseService, RedisService } from '../services';
+import { DatabaseService } from '../services';
 import { Logger } from '../services/logger';
 import { requireApiKey } from '../middleware';
 import { EventsListQuerySchema } from '../types/validation';
@@ -12,7 +12,6 @@ import {
 
 export function createEventsRoutes(
   getDatabase: () => DatabaseService | null,
-  getRedis: () => RedisService | null,
   logger: Logger
 ): Router {
   const router = Router();
@@ -30,9 +29,6 @@ export function createEventsRoutes(
       headerAgentId: req.headers['x-agent-id'],
     });
 
-  const getScopeCacheSegment = ({ orgId, agentId }: RequestScope): string =>
-    `org:${orgId ?? 'all'}:agent:${agentId ?? 'all'}`;
-
   router.get('/sessions/:sessionId/events', requireApiKey, async (req: Request, res: Response): Promise<void> => {
     const { sessionId } = req.params as { sessionId: string };
     const requestId = getRequestId(res);
@@ -40,7 +36,6 @@ export function createEventsRoutes(
     try {
       const scope = getRequestedScope(req);
       const database = getDatabase();
-      const redis = getRedis();
 
       const queryResult = EventsListQuerySchema.safeParse(req.query);
       if (!queryResult.success) {
@@ -56,28 +51,6 @@ export function createEventsRoutes(
       }
       const { limit, offset, event_type: eventType } = queryResult.data;
 
-      logger.debug('Session events query start', {
-        requestId,
-        sessionId,
-        limit,
-        offset,
-        eventType: eventType || null,
-        orgId: scope.orgId,
-        agentId: scope.agentId,
-      });
-
-      const cacheKey = `events:v2:${getScopeCacheSegment(scope)}:${sessionId}:${limit}:${offset}${
-        eventType ? `:${eventType}` : ''
-      }`;
-      if (redis) {
-        const cached = await redis.getJSON(cacheKey);
-        if (cached) {
-          logger.debug('Session events served from cache', { requestId, sessionId, cacheKey });
-          res.json({ success: true, data: cached, source: 'cache' });
-          return;
-        }
-      }
-
       if (!database) {
         res.status(503).json({ success: false, error: 'Database not available yet.' });
         return;
@@ -91,10 +64,6 @@ export function createEventsRoutes(
         events: spans,
         pagination: { limit, offset, total, hasMore: offset + limit < total },
       };
-
-      if (redis) {
-        await redis.setJSON(cacheKey, responseData, 10);
-      }
 
       logger.info('Session events query complete', {
         requestId,

@@ -21,30 +21,6 @@ services:
       retries: 10
       start_period: 10s
 
-  # Cache Layer - Redis
-  redis:
-    image: docker.io/library/redis:7-alpine
-    container_name: redis-cache
-    ports:
-      - "6379:6379"
-    command: >
-      redis-server
-      --requirepass redis_password
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy volatile-lru
-    volumes:
-      - redis_data:/data
-    networks:
-      - remi-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a redis_password ping | grep -q PONG"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
-
   # API Backend
   backend:
     build:
@@ -69,11 +45,6 @@ services:
       # Read Replica — set to primary for dev (replica streaming not configured)
       DB_READ_HOST: postgres-primary
       DB_READ_PORT: 5432
-      # Redis
-      REDIS_HOST: redis-cache
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: redis_password
-      REDIS_DB: 0
       # OpenTelemetry
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: remi-backend
@@ -84,8 +55,6 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     depends_on:
       postgres-primary:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     volumes:
       - ./remi-backend/src:/app/src
@@ -160,4 +129,3 @@ networks:
 
 volumes:
   postgres_primary_data:
-  redis_data:

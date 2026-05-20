@@ -19,7 +19,6 @@ Express 5 REST API that ingests OpenTelemetry spans, stores them in Postgres, an
 |------------|-----------|
 | Bun        | >= 1.0    |
 | Postgres   | 16        |
-| Redis      | 7         |
 
 For local development the full infra stack is provided by `docker-compose.yml` in the repo root.
 
@@ -86,11 +85,6 @@ bun test test/validation.test.js   # single test file
 | `DB_POOL_MAX`              | `20`               | Max connections in pool                                       |
 | `DB_CONNECTION_TIMEOUT_MS` | `5000`             | Connection acquire timeout                                    |
 | `DB_QUERY_TIMEOUT_MS`      | `30000`            | Query execution timeout                                       |
-| `REDIS_HOST`               | `redis-cache`      | Redis hostname                                                |
-| `REDIS_PORT`               | `6379`             | Redis port                                                    |
-| `REDIS_PASSWORD`           | `redis_password`   | Redis auth password                                           |
-| `REDIS_DB`                 | `0`                | Redis database index                                          |
-| `REDIS_MAX_VALUE_BYTES`    | `5242880`          | Max bytes per Redis cached value (5 MB)                       |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` | OTel collector endpoint                |
 | `OTEL_SERVICE_NAME`        | `remi-backend`     | Service name in traces                                        |
 | `OPENAI_API_KEY`           | _(none)_           | Optional. Used by the span-analysis (LLM-as-judge) feature.  |
@@ -125,9 +119,7 @@ OTel Collector / OpenRouter webhook
         ▼
 remi-backend
         │ direct write (asyncpg)
-        ├──────────────────────────────▶ Postgres
-        │ cache invalidation
-        └──────────────────────────────▶ Redis
+        └──────────────────────────────▶ Postgres
                                          ◀── remi (frontend) reads via GET endpoints
 ```
 

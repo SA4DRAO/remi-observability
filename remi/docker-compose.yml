@@ -1,49 +1,21 @@
-# Deployment configuration for cloud platforms
-
-## Docker Compose (Local Development)
-version: '3.8'
-
+# Standalone docker-compose for remi (frontend) development.
+# Use the root docker-compose.yml to run the full stack (recommended).
 services:
-  backend:
-    build:
-      context: ../remi-backend
-      dockerfile: Dockerfile
-    ports:
-      - "3100:3100"
-    environment:
-      - NODE_ENV=development
-      - PORT=3100
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk_test_}
-      - LOG_LEVEL=debug
-      - CORS_ORIGINS=http://localhost:3000,http://frontend:3000
-    networks:
-      - remi-network
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
-
   frontend:
     build:
       context: ./remi
       dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3100}
+        VITE_API_KEY: ${REMI_API_KEY:-test-key-123}
+        VITE_ENV: development
+        VITE_ENABLE_DEBUG: "true"
     ports:
       - "3000:3000"
     environment:
-      - VITE_API_URL=http://backend:3100
-      - VITE_ENV=development
-      - VITE_ENABLE_DEBUG=true
-    volumes:
-      - ./remi/src:/app/src
-    networks:
-      - remi-network
-    depends_on:
-      backend:
-        condition: service_healthy
+      NODE_ENV: production
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

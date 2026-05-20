@@ -35,7 +35,7 @@ Remi is built with:
 - **Cross-session analytics** — Error rates, model breakdown, version comparison — all queryable by org, agent, and date range
 - **LLM-as-a-judge span analysis** — Select any span in the trace and ask an LLM to evaluate it (latency, quality, cost efficiency)
 - **OpenTelemetry native** — Works with any OTel-compatible source out of the box; no proprietary SDK required
-- **LangChain / LangGraph support** — Drop-in `RemiCallback` emits properly structured spans without any third-party instrumentation package
+- **LangChain / LangGraph support** — Two lines of setup (`configure_otel` + `LangchainInstrumentor().instrument()`) gives full trace coverage with no custom callbacks
 - **OpenRouter webhook support** — Forward production traces directly from OpenRouter into Remi
 - **Version comparison** — Tag your agents with `service.version` and compare token usage, cost, and error rate across releases
 - **Model pricing sync** — Pulls current pricing from LiteLLM's community-maintained dataset; cost calculations stay accurate

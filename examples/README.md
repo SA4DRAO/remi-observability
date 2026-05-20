@@ -1,29 +1,28 @@
 # examples
 
-Python demo scripts that run LangChain agents against a live Remi stack and show up as sessions in the dashboard.
+Python demo scripts that run LangChain/LangGraph agents against a live Remi stack and show up as sessions in the dashboard.
 
 ---
 
 ## What it does
 
-Each script runs a LangChain agent (LCEL chain, ReAct agent, LangGraph supervisor, etc.) instrumented with `otel_setup.py`. Spans are emitted via OTLP HTTP to the OTel Collector, which forwards them to remi-backend. Sessions appear in the dashboard within a few seconds of the script completing.
+Each script runs an agent instrumented with `otel_setup.py` and `LangchainInstrumentor`. Spans are emitted via OTLP HTTP to the OTel Collector, which forwards them to remi-backend. Sessions appear in the dashboard within a few seconds of the script completing.
 
-No remi-specific SDK is required — instrumentation uses standard `opentelemetry-sdk` plus a thin `RemiCallback(BaseCallbackHandler)` defined in `otel_setup.py`.
+No proprietary SDK is required — instrumentation uses standard `opentelemetry-instrumentation-langchain`.
 
 ---
 
 ## Prerequisites
 
-| Tool     | Version              |
-|----------|----------------------|
-| Python   | >= 3.9               |
-| pip      | any                  |
+| Tool     | Version |
+|----------|---------|
+| Python   | >= 3.9  |
 
 The full infra stack must be running before executing any example:
 
 ```bash
 # from repo root
-docker-compose up -d
+docker-compose up -d   # or: podman-compose up -d
 ```
 
 ---
@@ -33,25 +32,26 @@ docker-compose up -d
 ```bash
 cd examples
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Copy your credentials into environment variables (or a `.env` file loaded by `python-dotenv`):
+Create a `.env` file in `examples/`:
 
 ```bash
-export REMI_API_KEY=your-api-key          # must match the backend's REMI_API_KEY
-export OPENAI_API_KEY=your-llm-key        # required for all examples
-export REMI_ORG_ID=demo-org               # org label shown in the dashboard
-export REMI_AGENT_ID=demo-agent           # agent label shown in the dashboard
+OPENAI_API_KEY=sk-...          # required
+REMI_API_KEY=test-key-123      # must match REMI_API_KEY in root .env
+REMI_BACKEND_URL=http://localhost:3100
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
 
-# Optional — override the LLM provider
-# Default uses Google Gemini via their OpenAI-compatible endpoint:
-export OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-export OPENAI_MODEL=gemini-2.0-flash
+Or copy from the root `.env`:
 
-# OTel collector endpoint (default works with docker-compose)
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```bash
+cp ../.env .env
+echo 'REMI_API_KEY=test-key-123' >> .env
+echo 'REMI_BACKEND_URL=http://localhost:3100' >> .env
 ```
 
 ---
@@ -59,61 +59,56 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ## Running examples
 
 ```bash
-python simple_chain_agent.py        # two-step LCEL pipeline (outline → expand)
-python research_agent.py            # ReAct agent with search tools
-python customer_support_agent.py    # multi-turn conversation
-python code_review_agent.py         # tool-heavy agent
-python multi_agent_supervisor.py    # LangGraph supervisor + subagents
-python tool_failure.py              # deliberate tool error for error-path testing
-python verify_kafka_events.py       # confirms events reached Kafka (diagnostic)
+python simple_chain_agent.py       # two-step LCEL pipeline (outline → expand)
+python research_agent.py           # ReAct agent with parallel tool lookups
+python customer_support_agent.py   # customer support agent with ticket workflows
+python code_review_agent.py        # tool-heavy StateGraph code analysis agent
+python multi_agent_supervisor.py   # two-agent pipeline: analyst → writer
+python tool_failure.py             # deliberate tool error for error-path testing
 ```
 
-After a script exits, open the dashboard at `http://localhost:3000` — sessions appear under the org/agent you configured.
+After a script exits, open the dashboard at `http://localhost:3000`. Each agent uses a distinct name (`simple-chain-agent`, `research-agent`, etc.) visible in the dashboard's agent filter.
 
 ---
 
 ## Environment variables
 
-| Variable                          | Default                             | Purpose                                                 |
-|-----------------------------------|-------------------------------------|---------------------------------------------------------|
-| `REMI_API_KEY`                    | _(required)_                        | Must match the backend's `REMI_API_KEY`                 |
-| `REMI_ORG_ID`                     | `demo-org`                          | Org label stamped on sessions                           |
-| `REMI_AGENT_ID`                   | `demo-agent`                        | Agent label stamped on sessions                         |
-| `REMI_BACKEND_URL`                | `http://localhost:3100`             | Used only for the optional health check before running  |
-| `OPENAI_API_KEY`                  | _(required)_                        | API key for the LLM provider                            |
-| `OPENAI_BASE_URL`                 | `https://api.openai.com/v1`         | Base URL — swap for Gemini/Anthropic/etc.               |
-| `OPENAI_MODEL`                    | `gemini-2.0-flash`                  | Model name passed to `ChatOpenAI`                       |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`     | `http://localhost:4318`             | OTLP HTTP endpoint (collector or backend directly)      |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | _(falls back to OTLP_ENDPOINT)_ | Override for traces-specific endpoint                   |
-| `OTEL_EXPORTER_OTLP_HEADERS`      | _(none)_                            | Comma-separated `key=value` headers for the exporter    |
-| `OTEL_SERVICE_VERSION`            | _(none)_                            | Stamp spans with a prompt/code version string           |
-| `REMI_AGENT_VERSION`              | _(none)_                            | Alternative to `OTEL_SERVICE_VERSION`                   |
+| Variable                      | Default                       | Purpose                                                 |
+|-------------------------------|-------------------------------|---------------------------------------------------------|
+| `OPENAI_API_KEY`              | _(required)_                  | API key for the LLM provider                            |
+| `REMI_API_KEY`                | `test-key-123`                | Must match the backend's `REMI_API_KEY`                 |
+| `REMI_BACKEND_URL`            | `http://localhost:3100`       | Used for the health check before running                |
+| `OPENAI_BASE_URL`             | `https://api.openai.com/v1`   | Swap for any OpenAI-compatible endpoint                 |
+| `OPENAI_MODEL`                | `gpt-4o-mini`                 | Model name passed to `ChatOpenAI`                       |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318`       | OTLP HTTP endpoint (OTel Collector)                     |
+
+Each agent has its own hardcoded `AGENT_ID` default (e.g. `research-agent`, `support-agent`). Override with `REMI_AGENT_ID` if needed.
 
 ---
 
 ## How instrumentation works
 
-All examples import from `otel_setup.py` (not a package — run from the `examples/` directory):
+All examples follow this pattern:
 
 ```python
-from otel_setup import configure_otel, make_callback, set_session_id
+from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+from otel_setup import configure_otel, set_session_id
 
 tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
+LangchainInstrumentor().instrument()   # auto-instruments all LangChain/LangGraph calls
 
-# Call before each invocation
-set_session_id(str(uuid.uuid4()))
+# Before each invocation:
+set_session_id(session_id)
+with tracer.start_as_current_span("AgentExecutor", attributes={"remi.session_id": session_id}):
+    agent.invoke(inputs)   # no callbacks needed
 
-# Fresh callback per invocation
-cb = make_callback(tracer)
-result = chain.invoke(inputs, config={"callbacks": [cb]})
-
-# Flush all spans before the process exits
+# Flush spans before exit:
 tracer_provider.shutdown()
 ```
 
-`configure_otel` is safe to call multiple times — it only configures once (guarded by `_CONFIGURED`). `make_callback` must be called fresh for each invocation; `RemiCallback` is not thread-safe.
+`configure_otel` sets `service.name` = agent ID and `service.namespace` = org ID as OTel resource attributes, which the backend uses to populate `agent_id` and `org_id` in the dashboard.
 
-Sessions are created automatically by the V2 OTLP ingest path in remi-backend — no explicit session creation call is needed.
+Sessions are created automatically by the OTLP ingest path — no explicit session creation call needed.
 
 ---
 
@@ -126,7 +121,7 @@ examples/
 OTel Collector
         │ POST /api/v1/traces
         ▼
-remi-backend → Kafka → remi-worker → Postgres
-                                          ▲
-                              remi (dashboard) reads
+remi-backend → Postgres
+                    ▲
+        remi (dashboard) reads
 ```

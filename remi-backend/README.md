@@ -1,17 +1,15 @@
 # remi-backend
 
-REST API that ingests LangChain and OTLP events, validates them, publishes to Kafka, and serves dashboard queries to the frontend.
+Express 5 REST API that ingests OpenTelemetry spans, stores them in Postgres, and serves dashboard queries to the frontend.
 
 ---
 
 ## What it does
 
-- Accepts event batches from the remi-langchain SDK (`POST /api/v1/events/batch`)
 - Accepts OTLP span payloads from the OTel Collector or OpenRouter webhooks (`POST /api/v1/traces`)
-- Validates all payloads with Zod schemas and enforces a 256 KB per-event data limit
-- Publishes validated events to Kafka (`remi-events`, `remi-sessions` topics)
-- Serves paginated reads of sessions and events from Postgres, with Redis caching
-- Emits its own OTel traces to the collector
+- Normalizes spans to an internal format, resolves session/org/agent identity, writes directly to Postgres
+- Serves paginated reads of sessions, spans, and analytics from Postgres, with Redis caching
+- Emits its own OTel traces to the collector for self-observability
 
 ---
 
@@ -20,9 +18,7 @@ REST API that ingests LangChain and OTLP events, validates them, publishes to Ka
 | Tool       | Version   |
 |------------|-----------|
 | Bun        | >= 1.0    |
-| Node.js    | >= 20     |
 | Postgres   | 16        |
-| Kafka      | 7.5 (Confluent) |
 | Redis      | 7         |
 
 For local development the full infra stack is provided by `docker-compose.yml` in the repo root.
@@ -35,14 +31,14 @@ For local development the full infra stack is provided by `docker-compose.yml` i
 cd remi-backend
 bun install
 
-# Create a .env file (see environment variables section below)
 cp ../.env.example .env
+# Edit .env — set REMI_API_KEY and DB/Redis connection vars
 
 bun run dev
 # Server listens on http://localhost:3100
 ```
 
-The server starts immediately and returns 503 on data routes until Kafka/Postgres/Redis connect. Health check is always available:
+The server starts immediately and returns 503 on data routes until Postgres/Redis connect. Health check is always available:
 
 ```bash
 curl http://localhost:3100/health
@@ -90,16 +86,11 @@ bun test test/validation.test.js   # single test file
 | `DB_POOL_MAX`              | `20`               | Max connections in pool                                       |
 | `DB_CONNECTION_TIMEOUT_MS` | `5000`             | Connection acquire timeout                                    |
 | `DB_QUERY_TIMEOUT_MS`      | `30000`            | Query execution timeout                                       |
-| `KAFKA_BROKERS`            | `kafka:29092`      | Comma-separated broker list                                   |
-| `KAFKA_EVENT_TOPIC`        | `remi-events`      | Topic for event messages                                      |
-| `KAFKA_SESSION_TOPIC`      | `remi-sessions`    | Topic for session messages                                    |
-| `KAFKA_MAX_MESSAGE_BYTES`  | `286720`           | Max Kafka message size (280 KB). Must match broker config.    |
 | `REDIS_HOST`               | `redis-cache`      | Redis hostname                                                |
 | `REDIS_PORT`               | `6379`             | Redis port                                                    |
 | `REDIS_PASSWORD`           | `redis_password`   | Redis auth password                                           |
 | `REDIS_DB`                 | `0`                | Redis database index                                          |
 | `REDIS_MAX_VALUE_BYTES`    | `5242880`          | Max bytes per Redis cached value (5 MB)                       |
-| `MAX_EVENT_DATA_BYTES`     | `262144`           | Max bytes for `event.data` JSON payload (256 KB)              |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4318` | OTel collector endpoint                |
 | `OTEL_SERVICE_NAME`        | `remi-backend`     | Service name in traces                                        |
 | `OPENAI_API_KEY`           | _(none)_           | Optional. Used by the span-analysis (LLM-as-judge) feature.  |
@@ -110,15 +101,17 @@ bun test test/validation.test.js   # single test file
 
 ## Key API endpoints
 
-| Method | Path                           | Auth                          | Description                        |
-|--------|--------------------------------|-------------------------------|------------------------------------|
-| GET    | `/health`                      | None                          | Service health check               |
-| POST   | `/api/v1/events/batch`         | Bearer API key                | Ingest batch of LangChain events   |
-| GET    | `/api/v1/events`               | Bearer API key                | Paginated event list               |
-| GET    | `/api/v1/sessions`             | Bearer API key                | Paginated session list             |
-| GET    | `/api/v1/sessions/:id/metrics` | Bearer API key                | Per-session metrics                |
-| POST   | `/api/v1/traces`               | Bearer API key or webhook secret | OTLP span ingest               |
-| GET    | `/api/v1/analytics`            | Bearer API key                | Cross-session rollup data          |
+| Method | Path                                  | Auth                             | Description                        |
+|--------|---------------------------------------|----------------------------------|------------------------------------|
+| GET    | `/health`                             | None                             | Service health check               |
+| POST   | `/api/v1/traces`                      | Bearer API key or webhook secret | OTLP span ingest                   |
+| GET    | `/api/v1/sessions`                    | Bearer API key                   | Paginated session list             |
+| GET    | `/api/v1/sessions/:id`                | Bearer API key                   | Session detail                     |
+| GET    | `/api/v1/sessions/:id/metrics`        | Bearer API key                   | Per-session metrics                |
+| POST   | `/api/v1/sessions/:id/analyze-span`   | Bearer API key                   | LLM-as-judge span analysis         |
+| GET    | `/api/v1/events/sessions/:id/events`  | Bearer API key                   | Spans for a session                |
+| GET    | `/api/v1/events/spans/:id/attributes` | Bearer API key                   | Span attributes                    |
+| GET    | `/api/v1/analytics`                   | Bearer API key                   | Cross-session rollup data          |
 
 All data endpoints require `Authorization: Bearer <REMI_API_KEY>`.
 
@@ -127,15 +120,14 @@ All data endpoints require `Authorization: Bearer <REMI_API_KEY>`.
 ## How it connects to other components
 
 ```
-remi-langchain SDK / examples/otel_setup.py
-        │ HTTP POST
+OTel Collector / OpenRouter webhook
+        │ POST /api/v1/traces
         ▼
 remi-backend
-        │ Kafka publish (remi-events, remi-sessions)
-        ├──────────────────────────────▶ remi-worker (consumes, writes to Postgres)
-        │ Redis cache invalidation
+        │ direct write (asyncpg)
+        ├──────────────────────────────▶ Postgres
+        │ cache invalidation
         └──────────────────────────────▶ Redis
-                                         Postgres (direct writes for OTLP V2 path)
                                          ◀── remi (frontend) reads via GET endpoints
 ```
 
@@ -145,5 +137,3 @@ remi-backend
 
 - `REMI_API_KEY` is read at module load time — the process exits if it is not set.
 - `src/telemetry.ts` must be the first import in `src/index.ts` — it patches Express/http before anything else loads.
-- Kafka messages exceeding `KAFKA_MAX_MESSAGE_BYTES` are rejected before publishing; the backend returns a 413 error.
-- The backend returns 207 (not 500) when Kafka is unavailable — events accepted but not queued.

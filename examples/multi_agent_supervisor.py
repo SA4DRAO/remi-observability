@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import uuid
+
 import httpx
 from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
@@ -33,6 +35,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
+
+from opentelemetry.instrumentation.langchain import LangchainInstrumentor
 
 from otel_setup import configure_otel, set_session_id
 from tool_failure import configure_example_tools, maybe_fail_tool_call
@@ -46,9 +50,8 @@ logging.basicConfig(
 )
 
 BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
-API_KEY = os.getenv("REMI_API_KEY", "test-key-123")
-ORG_ID = os.getenv("REMI_ORG_ID") or "org-operations"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "agent-multi-supervisor"
+ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
+AGENT_ID = os.getenv("REMI_AGENT_ID") or "supervisor-agent"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
@@ -230,30 +233,6 @@ def check_backend_health() -> bool:
         return False
 
 
-def create_session(name: str, metadata: dict[str, Any]) -> str:
-    try:
-        r = httpx.post(
-            f"{BACKEND_URL}/api/v1/sessions",
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "X-Org-Id": ORG_ID,
-                "X-Agent-Id": AGENT_ID,
-            },
-            json={
-                "name": name,
-                "metadata": metadata,
-                "org_id": ORG_ID,
-                "agent_id": AGENT_ID,
-            },
-            timeout=5.0,
-        )
-        if r.status_code == 201:
-            return r.json()["session_id"]
-    except Exception:
-        pass
-    return f"local-{int(time.time())}"
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -270,7 +249,8 @@ def main() -> None:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
     llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=openai_api_key)
-    tracer_provider, tracer = configure_otel("remi.examples.multi_agent_supervisor", org_id=ORG_ID)
+    tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
+    LangchainInstrumentor().instrument()
 
     # Stage 1: Analyst agent — LangGraph ReAct
     analyst_agent = create_react_agent(llm, ANALYST_TOOLS, prompt=ANALYST_SYSTEM_PROMPT)
@@ -290,10 +270,7 @@ def main() -> None:
 
     try:
         for scenario in SCENARIOS:
-            session_id = create_session(
-                name=f"Pipeline - {scenario.name}",
-                metadata={"agent_type": "multi_agent_pipeline", **scenario.metadata},
-            )
+            session_id = f"supervisor-{uuid.uuid4().hex[:8]}"
             log.info("Scenario='%s'  session=%s", scenario.name, session_id)
             set_session_id(session_id)
 

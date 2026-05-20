@@ -549,17 +549,18 @@ export function normalizeOtlpPayload(
         const sessionId =
           traceIdentity?.sessionId ?? resourceIdentity.sessionId ?? resolvedTraceIdentity?.sessionId;
         if (sessionId === undefined) continue;
-        // Header identity wins over span/resource for org and agent —
-        // the collector is the authoritative source for external broadcasts.
+        // Resource identity (service.namespace/service.name) wins — agents that
+        // set their own identity take precedence. Header is fallback for external
+        // sources (OpenRouter) that have no resource attributes.
         const orgId =
+          resourceIdentity.orgId ??
           headerIdentity.orgId ??
           traceIdentity?.orgId ??
-          resourceIdentity.orgId ??
           resolvedTraceIdentity?.orgId;
         const agentId =
+          resourceIdentity.agentId ??
           headerIdentity.agentId ??
           traceIdentity?.agentId ??
-          resourceIdentity.agentId ??
           resolvedTraceIdentity?.agentId;
 
         const spanAttrs = flattenAttributes(span.attributes ?? []);

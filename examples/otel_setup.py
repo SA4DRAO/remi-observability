@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from contextvars import ContextVar
 from typing import Any, Optional
 from uuid import UUID
@@ -60,7 +59,7 @@ def set_provider(provider: str) -> None:
 
 
 class _MetadataSpanProcessor(SpanProcessor):
-    """Injects session_id, conversation_id, and prompt_version from ContextVars into every span."""
+    """Injects session_id, conversation_id, prompt_version, and provider from ContextVars into every span."""
 
     def on_start(self, span: Span, parent_context: Optional[context.Context] = None) -> None:
         session_id = _session_id_var.get()
@@ -84,7 +83,6 @@ class _MetadataSpanProcessor(SpanProcessor):
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         return True
-
 
 
 class RemiCallback(BaseCallbackHandler):
@@ -354,7 +352,9 @@ def _infer_provider(model: str) -> str:
         return "google"
     if "mistral" in m:
         return "mistral"
-    return "openai"
+    if "llama" in m or "meta" in m:
+        return "meta"
+    return "unknown"
 
 
 def _parse_headers(raw: str | None) -> dict[str, str] | None:

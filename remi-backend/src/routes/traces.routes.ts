@@ -152,14 +152,14 @@ export function createTracesRoutes(
           createSessionId();
 
         const orgId =
-          headerIdentity.orgId ??
           candidate.explicitIdentity.orgId ??
+          headerIdentity.orgId ??
           traceMapping?.orgId ??
           aliasMapping?.orgId;
 
         const agentId =
-          headerIdentity.agentId ??
           candidate.explicitIdentity.agentId ??
+          headerIdentity.agentId ??
           traceMapping?.agentId ??
           aliasMapping?.agentId;
 

@@ -24,3 +24,9 @@ examples/venv/
 # Root-level package files (not part of any sub-package)
 package.json
 package-lock.json
+
+# Marketing site (separate repo)
+remi-marketing/
+
+# Claude internal planning docs
+.claude/

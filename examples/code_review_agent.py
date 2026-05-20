@@ -1,28 +1,27 @@
 """Code review agent — explicit LangGraph StateGraph with conditional routing.
 
 Demonstrates:
+- Pure OTLP instrumentation via LangchainInstrumentor (no custom callback needed)
 - A custom StateGraph (NOT create_react_agent) with named nodes
 - Conditional edge routing based on LLM classification output
-- RunnableConfig propagation into LCEL chains inside graph nodes
-- Remi OTLP traces via standard LangChain OpenTelemetry instrumentation
+
+This is how a production customer would integrate: point your existing OTel
+setup at the Remi collector and all LangChain/LangGraph calls are traced
+automatically — no SDK-specific callback required.
 
 Graph structure:
     classify → security_review ─┐
              ↘                  ├→ summarize
                style_review ────┘
 
-The 'classify' node asks the LLM to categorise the primary concern
-(security vs. style/logic). The conditional edge routes to the relevant
-specialist node before a final summarize node produces the PR comment.
-
 Usage:
-    python examples/code_review_agent.py
+    python code_review_agent.py
 """
 from __future__ import annotations
 
 import logging
 import os
-import time
+import uuid
 from typing import Any, Literal, TypedDict
 
 import httpx
@@ -33,6 +32,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
+from opentelemetry.instrumentation.langchain import LangchainInstrumentor
 
 from otel_setup import configure_otel, set_session_id
 
@@ -45,9 +45,8 @@ logging.basicConfig(
 )
 
 BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
-API_KEY = os.getenv("REMI_API_KEY", "test-key-123")
-ORG_ID = os.getenv("REMI_ORG_ID") or "org-engineering"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "agent-code-review"
+ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
+AGENT_ID = os.getenv("REMI_AGENT_ID") or "code-review-agent"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
@@ -60,7 +59,7 @@ BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 class ReviewState(TypedDict):
     code: str
     language: str
-    category: str           # "security" | "style"
+    category: str           # "security" | "style" | "logic"
     security_findings: str
     style_findings: str
     summary: str
@@ -110,22 +109,12 @@ SAMPLES = [
 
 
 def build_graph(llm: ChatOpenAI) -> Any:
-    """Compile a ReviewState graph. LangGraph passes RunnableConfig automatically
-    to any node function that declares it as a second parameter."""
-
     parser = StrOutputParser()
 
     def classify_node(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(
-                content="You are a code quality expert. Reply with exactly one word: security, style, or logic."
-            ),
-            HumanMessage(
-                content=(
-                    f"What is the PRIMARY concern in this {state['language']} code?\n\n"
-                    f"{state['code']}"
-                )
-            ),
+            SystemMessage(content="You are a code quality expert. Reply with exactly one word: security, style, or logic."),
+            HumanMessage(content=f"What is the PRIMARY concern in this {state['language']} code?\n\n{state['code']}"),
         ])
         raw = (prompt | llm | parser).invoke({}, config=config)
         category = raw.strip().lower().split()[0]
@@ -136,40 +125,25 @@ def build_graph(llm: ChatOpenAI) -> Any:
 
     def security_review_node(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(
-                content="You are a security engineer. List vulnerabilities in 3 sentences max."
-            ),
-            HumanMessage(
-                content=f"Identify security issues in this code:\n\n{state['code']}"
-            ),
+            SystemMessage(content="You are a security engineer. List vulnerabilities in 3 sentences max."),
+            HumanMessage(content=f"Identify security issues in this code:\n\n{state['code']}"),
         ])
-        findings = (prompt | llm | parser).invoke({}, config=config)
-        return {"security_findings": findings}
+        return {"security_findings": (prompt | llm | parser).invoke({}, config=config)}
 
     def style_review_node(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(
-                content="You are a senior Python engineer. Give style and correctness feedback in 3 sentences max."
-            ),
-            HumanMessage(
-                content=f"Review style and logic issues in this code:\n\n{state['code']}"
-            ),
+            SystemMessage(content="You are a senior Python engineer. Give style and correctness feedback in 3 sentences max."),
+            HumanMessage(content=f"Review style and logic issues in this code:\n\n{state['code']}"),
         ])
-        findings = (prompt | llm | parser).invoke({}, config=config)
-        return {"style_findings": findings}
+        return {"style_findings": (prompt | llm | parser).invoke({}, config=config)}
 
     def summarize_node(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
         findings = state.get("security_findings") or state.get("style_findings") or "No specific findings."
         prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(
-                content="You are a tech lead. Write a 2-sentence PR review comment."
-            ),
-            HumanMessage(
-                content=f"Summarise these findings as a PR comment:\n{findings}\n\nCode:\n{state['code']}"
-            ),
+            SystemMessage(content="You are a tech lead. Write a 2-sentence PR review comment."),
+            HumanMessage(content=f"Summarise these findings as a PR comment:\n{findings}\n\nCode:\n{state['code']}"),
         ])
-        summary = (prompt | llm | parser).invoke({}, config=config)
-        return {"summary": summary}
+        return {"summary": (prompt | llm | parser).invoke({}, config=config)}
 
     def route_after_classify(state: ReviewState) -> Literal["security_review", "style_review"]:
         return "security_review" if state["category"] == "security" else "style_review"
@@ -179,13 +153,11 @@ def build_graph(llm: ChatOpenAI) -> Any:
     graph.add_node("security_review", security_review_node)
     graph.add_node("style_review", style_review_node)
     graph.add_node("summarize", summarize_node)
-
     graph.set_entry_point("classify")
     graph.add_conditional_edges("classify", route_after_classify)
     graph.add_edge("security_review", "summarize")
     graph.add_edge("style_review", "summarize")
     graph.add_edge("summarize", END)
-
     return graph.compile()
 
 
@@ -205,30 +177,6 @@ def check_backend_health() -> bool:
         return False
 
 
-def create_session(name: str, metadata: dict[str, Any]) -> str:
-    try:
-        r = httpx.post(
-            f"{BACKEND_URL}/api/v1/sessions",
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "X-Org-Id": ORG_ID,
-                "X-Agent-Id": AGENT_ID,
-            },
-            json={
-                "name": name,
-                "metadata": metadata,
-                "org_id": ORG_ID,
-                "agent_id": AGENT_ID,
-            },
-            timeout=5.0,
-        )
-        if r.status_code == 201:
-            return r.json()["session_id"]
-    except Exception:
-        pass
-    return f"local-{int(time.time())}"
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -244,27 +192,25 @@ def main() -> None:
     if not openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
+    tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
+    # Auto-instrument all LangChain/LangGraph calls — no callback needed.
+    LangchainInstrumentor().instrument()
+
     llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=openai_api_key)
-    tracer_provider, tracer = configure_otel("remi.examples.code_review", org_id=ORG_ID)
     compiled_graph = build_graph(llm)
 
     log.info("Reviewing %d code samples", len(SAMPLES))
 
     try:
         for i, sample in enumerate(SAMPLES, start=1):
-            session_id = create_session(
-                name=f"Code Review #{i} ({sample['language']})",
-                metadata={"agent_type": "state_graph", **sample["metadata"]},
-            )
+            session_id = f"code-review-{uuid.uuid4().hex[:8]}"
             log.info("Sample #%d  session=%s", i, session_id)
             set_session_id(session_id)
 
             try:
                 with tracer.start_as_current_span(
-                    "remi.session",
-                    attributes={
-                        "remi.session_id": session_id,
-                    },
+                    "code_review",
+                    attributes={"remi.session_id": session_id},
                 ):
                     result = compiled_graph.invoke(
                         {"code": sample["code"], "language": sample["language"]}
@@ -279,7 +225,6 @@ def main() -> None:
                 log.exception("Sample #%d failed", i)
 
         log.info("All samples reviewed")
-    
     finally:
         log.info("Flushing spans to backend...")
         tracer_provider.shutdown()

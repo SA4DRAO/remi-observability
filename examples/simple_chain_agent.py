@@ -2,8 +2,9 @@
 
 Demonstrates:
 - Pure LangChain Expression Language (LCEL) pipeline: Prompt → LLM → OutputParser
-- Remi observability via RemiCallback (no external instrumentation package needed)
+- Pure OTLP instrumentation via LangchainInstrumentor (no custom callback needed)
 - Two LLM calls per topic (outline + expand) visible as child spans in the trace view
+- Conversation grouping: both topics share one conversation_id in the Remi UI
 
 Usage:
     python simple_chain_agent.py
@@ -20,7 +21,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from otel_setup import configure_otel, make_callback, set_session_id, set_conversation_id
+from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+
+from otel_setup import configure_otel, set_conversation_id, set_session_id
 
 load_dotenv()
 
@@ -29,7 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
 ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "simple-chain"
+AGENT_ID = os.getenv("REMI_AGENT_ID") or "simple-chain-agent"
 AGENT_VERSION = os.getenv("REMI_AGENT_VERSION", "v1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -72,39 +75,34 @@ def main() -> None:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
     tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID, service_version=AGENT_VERSION)
+    LangchainInstrumentor().instrument()
     parser = StrOutputParser()
 
     llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=openai_api_key)
 
     try:
+        conversation_id = f"blog-series-{uuid.uuid4().hex[:8]}"
+        set_conversation_id(conversation_id)
+        log.info("conversation=%s  topics=%d", conversation_id, len(TOPICS))
+
         for item in TOPICS:
             session_id = f"simple-chain-{uuid.uuid4().hex[:8]}"
             log.info("topic=%r  session=%s", item["topic"][:50], session_id)
             set_session_id(session_id)
 
-            cb = make_callback(tracer)
-
             try:
                 with tracer.start_as_current_span(
                     "RunnableSequence",
-                    attributes={
-                        "remi.session_id": session_id,
-                        "remi.org_id": ORG_ID,
-                        "remi.agent_id": AGENT_ID,
-                    },
+                    attributes={"remi.session_id": session_id},
                 ):
                     outline_chain = OUTLINE_PROMPT | llm | parser
                     outline = outline_chain.invoke(
                         {"topic": item["topic"], "tone": item["tone"]},
-                        config={"callbacks": [cb]},
                     )
                     log.info("Outline: %d chars", len(outline))
 
                     expand_chain = EXPAND_PROMPT | llm | parser
-                    post = expand_chain.invoke(
-                        {"outline": outline},
-                        config={"callbacks": [cb]},
-                    )
+                    post = expand_chain.invoke({"outline": outline})
                     log.info("Post: %d chars — %s…", len(post), post[:80])
 
             except Exception:

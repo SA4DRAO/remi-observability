@@ -26,7 +26,9 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from otel_setup import configure_otel, make_callback, set_session_id
+from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+
+from otel_setup import configure_otel, set_session_id
 from tool_failure import configure_example_tools, maybe_fail_tool_call
 
 load_dotenv()
@@ -42,8 +44,8 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
 API_KEY = os.getenv("REMI_API_KEY", "test-key-123")
-ORG_ID = os.getenv("REMI_ORG_ID") or "org-support"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "agent-customer-support"
+ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
+AGENT_ID = os.getenv("REMI_AGENT_ID") or "support-agent"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
@@ -272,6 +274,7 @@ def main() -> None:
         api_key=openai_api_key,
     )
     tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
+    LangchainInstrumentor().instrument()
     agent = create_react_agent(llm, TOOLS, prompt=SYSTEM_PROMPT)
 
     log.info("Processing %d tickets", len(TICKETS))
@@ -281,22 +284,18 @@ def main() -> None:
             session_id = make_session_id()
             log.info("Ticket=%r  session=%s", ticket.name, session_id)
             set_session_id(session_id)
-            cb = make_callback(tracer)
 
             try:
                 with tracer.start_as_current_span(
                     "AgentExecutor",
                     attributes={
                         "remi.session_id": session_id,
-                        "remi.org_id": ORG_ID,
-                        "remi.agent_id": AGENT_ID,
                         "ticket.name": ticket.name,
                         "ticket.customer_id": ticket.customer_id,
                     },
                 ):
                     result = agent.invoke(
                         {"messages": [("user", ticket.description)]},
-                        config={"callbacks": [cb]},
                     )
 
                     final_messages = result.get("messages", [])

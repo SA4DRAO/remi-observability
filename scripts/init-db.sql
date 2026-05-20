@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_v2_agent_version    ON sessions_v2(agent
 CREATE TABLE IF NOT EXISTS traces_v2 (
     id             BIGSERIAL   PRIMARY KEY,
     trace_id       TEXT        NOT NULL UNIQUE,
-    session_id     TEXT        REFERENCES sessions_v2(session_id) ON DELETE SET NULL,
+    session_id     TEXT        REFERENCES sessions_v2(session_id) ON DELETE CASCADE,
     org_id         TEXT,
     agent_id       TEXT,
     source         TEXT,
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS spans_v2 (
     agent_id       TEXT,
     session_id     TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (trace_id, span_id, source)
+    UNIQUE (span_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_spans_v2_trace_id          ON spans_v2(trace_id);
@@ -123,7 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_spans_v2_created_at_brin   ON spans_v2 USING BRIN
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS span_attributes_v2 (
     id          BIGSERIAL   PRIMARY KEY,
-    span_id     TEXT        NOT NULL,
+    span_id     TEXT        NOT NULL REFERENCES spans_v2(span_id) ON DELETE CASCADE,
     trace_id    TEXT        NOT NULL,
     key         TEXT        NOT NULL,
     value_str   TEXT,
@@ -143,7 +143,7 @@ CREATE INDEX        IF NOT EXISTS idx_span_attrs_v2_created_brin ON span_attribu
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS span_events_v2 (
     id         BIGSERIAL   PRIMARY KEY,
-    span_id    TEXT        NOT NULL,
+    span_id    TEXT        NOT NULL REFERENCES spans_v2(span_id) ON DELETE CASCADE,
     trace_id   TEXT        NOT NULL,
     name       TEXT        NOT NULL,
     time_ns    BIGINT,
@@ -160,7 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_span_events_v2_span_id  ON span_events_v2(span_id
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS span_links_v2 (
     id              BIGSERIAL   PRIMARY KEY,
-    span_id         TEXT        NOT NULL,
+    span_id         TEXT        NOT NULL REFERENCES spans_v2(span_id) ON DELETE CASCADE,
     trace_id        TEXT        NOT NULL,
     linked_trace_id TEXT,
     linked_span_id  TEXT,
@@ -176,7 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_span_links_v2_linked_trace_id ON span_links_v2(li
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS usage_facts_v2 (
     id                 BIGSERIAL   PRIMARY KEY,
-    span_id            TEXT        NOT NULL,
+    span_id            TEXT        NOT NULL REFERENCES spans_v2(span_id) ON DELETE CASCADE,
     trace_id           TEXT        NOT NULL,
     session_id         TEXT,
     org_id             TEXT,
@@ -190,7 +190,8 @@ CREATE TABLE IF NOT EXISTS usage_facts_v2 (
     cache_write_tokens INT,
     reasoning_tokens   INT,
     event_date         DATE        NOT NULL DEFAULT CURRENT_DATE,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (span_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_facts_v2_trace_id      ON usage_facts_v2(trace_id);
@@ -204,7 +205,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_facts_v2_created_brin  ON usage_facts_v2 US
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cost_facts_v2 (
     id                   BIGSERIAL     PRIMARY KEY,
-    span_id              TEXT          NOT NULL,
+    span_id              TEXT          NOT NULL REFERENCES spans_v2(span_id) ON DELETE CASCADE,
     trace_id             TEXT          NOT NULL,
     session_id           TEXT,
     org_id               TEXT,
@@ -219,7 +220,8 @@ CREATE TABLE IF NOT EXISTS cost_facts_v2 (
     total_cost_usd       NUMERIC(18,8),
     pricing_source       TEXT,
     event_date           DATE          NOT NULL DEFAULT CURRENT_DATE,
-    created_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    created_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    UNIQUE (span_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cost_facts_v2_trace_id      ON cost_facts_v2(trace_id);
@@ -361,27 +363,6 @@ CREATE TABLE IF NOT EXISTS model_daily_rollups_v2 (
 CREATE INDEX IF NOT EXISTS idx_model_daily_rollups_v2_date_org ON model_daily_rollups_v2(date DESC, org_id);
 
 -- ---------------------------------------------------------------------------
--- 14. ingest_batches_v2 — idempotent ingest ledger
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS ingest_batches_v2 (
-    id                 BIGSERIAL   PRIMARY KEY,
-    batch_id           UUID        NOT NULL UNIQUE DEFAULT gen_random_uuid(),
-    source             TEXT,
-    batch_checksum     TEXT,
-    payload_size_bytes INT,
-    span_count         INT,
-    processing_status  TEXT        NOT NULL DEFAULT 'received',
-    first_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at       TIMESTAMPTZ,
-    retry_count        INT         NOT NULL DEFAULT 0,
-    error_detail       TEXT,
-    UNIQUE (source, batch_checksum)
-);
-
-CREATE INDEX IF NOT EXISTS idx_ingest_batches_v2_status     ON ingest_batches_v2(processing_status);
-CREATE INDEX IF NOT EXISTS idx_ingest_batches_v2_first_seen ON ingest_batches_v2(first_seen_at DESC);
-
--- ---------------------------------------------------------------------------
 -- Helper: recompute session_rollups_v2 for one session.
 -- Called by the backend and worker after every ingest batch.
 -- ---------------------------------------------------------------------------
@@ -394,7 +375,7 @@ DECLARE
   v_model_usage JSONB   := '{}';
   v_tool_usage  JSONB   := '{}';
   v_error_types JSONB   := '{}';
-  v_is_complete BOOLEAN := FALSE;
+  v_is_complete BOOLEAN := TRUE;
 BEGIN
   SELECT
     COUNT(*)                                              AS total_spans,
@@ -453,12 +434,6 @@ BEGIN
     WHERE s.session_id = p_session_id AND (s.name ILIKE '%tool%' OR s.kind = 4)
     GROUP BY s.name
   ) t;
-
-  SELECT EXISTS (
-    SELECT 1 FROM spans_v2 s2
-    WHERE s2.session_id = p_session_id
-      AND (s2.parent_span_id IS NULL OR s2.parent_span_id = '')
-  ) INTO v_is_complete;
 
   SELECT jsonb_object_agg(status_message, cnt)
   INTO v_error_types
@@ -529,27 +504,27 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TABLE IF NOT EXISTS trace_session_correlations (
-    trace_id   TEXT          PRIMARY KEY,
-    session_id VARCHAR(255)  NOT NULL,
-    org_id     VARCHAR(255),
-    agent_id   VARCHAR(255),
-    created_at TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    trace_id   TEXT        PRIMARY KEY,
+    session_id TEXT        NOT NULL,
+    org_id     TEXT,
+    agent_id   TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_trace_session_correlations_session_id
   ON trace_session_correlations(session_id);
 
 CREATE TABLE IF NOT EXISTS provider_alias_correlations (
-    provider    VARCHAR(100)  NOT NULL DEFAULT 'unknown',
-    alias_type  VARCHAR(50)   NOT NULL,
-    alias_value TEXT          NOT NULL,
-    session_id  VARCHAR(255)  NOT NULL,
+    provider    TEXT        NOT NULL DEFAULT 'unknown',
+    alias_type  TEXT        NOT NULL,
+    alias_value TEXT        NOT NULL,
+    session_id  TEXT        NOT NULL,
     trace_id    TEXT,
-    org_id      VARCHAR(255),
-    agent_id    VARCHAR(255),
-    created_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    org_id      TEXT,
+    agent_id    TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (provider, alias_type, alias_value)
 );
 

@@ -406,7 +406,7 @@ export class DatabaseService {
              (span_id, trace_id, parent_span_id, source, name, kind, status_code, status_message,
               model_name, provider, start_time_ns, end_time_ns, org_id, agent_id, session_id)
            VALUES ($1,$2,$3,'otlp',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-           ON CONFLICT (trace_id, span_id, source) DO NOTHING
+           ON CONFLICT (span_id) DO NOTHING
            RETURNING id`,
           [
             span.spanId,
@@ -466,7 +466,8 @@ export class DatabaseService {
               `INSERT INTO usage_facts_v2
                  (span_id, trace_id, session_id, org_id, agent_id, model_name, provider,
                   prompt_tokens, completion_tokens, total_tokens)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+               ON CONFLICT (span_id) DO NOTHING`,
               [
                 span.spanId,
                 traceId,
@@ -493,7 +494,8 @@ export class DatabaseService {
                 `INSERT INTO cost_facts_v2
                    (span_id, trace_id, session_id, org_id, agent_id, model_name, provider,
                     prompt_cost_usd, completion_cost_usd, total_cost_usd, pricing_source)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'model_pricing')`,
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'model_pricing')
+                 ON CONFLICT (span_id) DO NOTHING`,
                 [
                   span.spanId,
                   traceId,

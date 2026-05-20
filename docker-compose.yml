@@ -1,0 +1,249 @@
+services:
+  postgres-primary:
+    image: docker.io/library/postgres:16-alpine
+    container_name: postgres-primary
+    environment:
+      POSTGRES_USER: remi_user
+      POSTGRES_PASSWORD: remi_password
+      POSTGRES_DB: remi_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_primary_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - remi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remi_user -d remi_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Message Broker - Kafka with KRaft (no Zookeeper needed)
+  kafka:
+    image: docker.io/confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24
+      CLUSTER_ID: SbKYIzP0R6efgbMcteBElg
+      KAFKA_NODE_ID: 1
+      # Message Size Limits (Issue #7)
+      KAFKA_MESSAGE_MAX_BYTES: '286720'           # 280KB = 256KB + 10% overhead
+      KAFKA_REPLICA_FETCH_MAX_BYTES: '286720'
+      KAFKA_MAX_REQUEST_SIZE: '286720'
+    networks:
+      - remi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # Cache Layer - Redis
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass redis_password
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy volatile-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - remi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a redis_password ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # API Backend
+  backend:
+    build:
+      context: ./remi-backend
+      dockerfile: Dockerfile
+    container_name: remi-backend
+    ports:
+      - "3100:3100"
+    environment:
+      NODE_ENV: development
+      PORT: 3100
+      HOST: 0.0.0.0
+      REMI_API_KEY: ${REMI_API_KEY:-test-key-123}
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173,http://frontend:3000"
+      LOG_LEVEL: INFO
+      # Database
+      DB_HOST: postgres-primary
+      DB_PORT: 5432
+      DB_USER: remi_user
+      DB_PASSWORD: remi_password
+      DB_NAME: remi_db
+      # Read Replica — set to primary for dev (replica streaming not configured)
+      DB_READ_HOST: postgres-primary
+      DB_READ_PORT: 5432
+      # Kafka
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_EVENT_TOPIC: remi-events
+      KAFKA_SESSION_TOPIC: remi-sessions
+      # Redis
+      REDIS_HOST: redis-cache
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: redis_password
+      REDIS_DB: 0
+      # OpenTelemetry
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: remi-backend
+      OTEL_TRACES_SAMPLER: always_on
+      KAFKAJS_NO_PARTITIONER_WARNING: "1"
+      # LLM-as-a-judge (span analysis feature)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./remi-backend/src:/app/src
+    # Run the bind-mounted workspace source so demo/dev OTEL changes are not
+    # masked by the image's baked dist entrypoint.
+    command: ["bun", "run", "src/index.ts"]
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  # Frontend
+  frontend:
+    build:
+      context: ./remi/remi
+      dockerfile: Dockerfile
+      args:
+        # VITE_* vars are baked into the static bundle at build time.
+        # Must be browser-reachable (localhost), not Docker-internal hostnames.
+        VITE_API_URL: "http://localhost:3100"
+        VITE_API_KEY: ${REMI_API_KEY:-test-key-123}
+        VITE_ENV: development
+        VITE_ENABLE_DEBUG: "true"
+    container_name: remi-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # These are runtime env vars for the `serve` process — not used by the
+      # static bundle.  VITE_ vars are injected at build time via build.args.
+      NODE_ENV: production
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  # Background Worker - Kafka Consumer
+  worker:
+    build:
+      context: ./remi-worker
+      dockerfile: Dockerfile
+    container_name: remi-worker
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_EVENT_TOPIC: remi-events
+      KAFKA_SESSION_TOPIC: remi-sessions
+      KAFKA_GROUP_ID: remi-worker-group
+      # Database
+      DB_HOST: postgres-primary
+      DB_PORT: 5432
+      DB_USER: remi_user
+      DB_PASSWORD: remi_password
+      DB_NAME: remi_db
+      # Redis
+      REDIS_HOST: redis-cache
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: redis_password
+      # Logging
+      LOG_LEVEL: INFO
+      # OpenTelemetry
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: remi-worker
+      OTEL_TRACES_SAMPLER: always_on
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  # Distributed Tracing — Jaeger all-in-one
+  jaeger:
+    image: docker.io/jaegertracing/all-in-one:1.60
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      # Port 4317 (OTLP gRPC) is NOT exposed to host; collector reaches jaeger over remi-network
+    networks:
+      - remi-network
+    restart: unless-stopped
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: docker.io/otel/opentelemetry-collector-contrib:0.105.0
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol-contrib/otel-collector-config.yaml"]
+    environment:
+      REMI_API_KEY: ${REMI_API_KEY:-test-key-123}
+      REMI_ORG_ID: ${REMI_ORG_ID:-demo-org}
+      REMI_AGENT_ID: ${REMI_AGENT_ID:-demo-agent}
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/otel-collector-config.yaml:ro
+    ports:
+      - "4318:4318"     # OTLP HTTP (backend/worker → collector)
+    depends_on:
+      - jaeger
+      - backend
+    networks:
+      - remi-network
+    restart: unless-stopped
+
+networks:
+  remi-network:
+    driver: bridge
+
+volumes:
+  postgres_primary_data:
+  redis_data:

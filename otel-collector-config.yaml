@@ -1,0 +1,36 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  
+  otlphttp/backend:
+    endpoint: http://remi-backend:3100/api/v1/traces
+    encoding: json
+    headers:
+      x-api-key: "${env:REMI_API_KEY}"
+      # OTEL-native identity: collector stamps every forwarded batch with
+      # the deployment's org and agent so OpenRouter broadcasts (and any
+      # other external source) don't need to set resource attributes.
+      x-remi-org-id: "${env:REMI_ORG_ID}"
+      x-remi-agent-id: "${env:REMI_AGENT_ID}"
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, otlphttp/backend]

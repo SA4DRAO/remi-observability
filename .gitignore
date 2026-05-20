@@ -1,0 +1,26 @@
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and scratch files
+*.log
+*.txt
+node_modules
+
+# Example virtualenvs
+examples/venv/
+
+# Root-level package files (not part of any sub-package)
+package.json
+package-lock.json

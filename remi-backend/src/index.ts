@@ -5,7 +5,7 @@ import type { Express } from 'express';
 import cors from 'cors';
 
 import { loadConfig, validateConfig } from './config';
-import { Logger, KafkaService, RedisService, DatabaseService } from './services';
+import { Logger, RedisService, DatabaseService } from './services';
 import { createErrorHandler, createRequestLogger } from './middleware';
 import { createHealthRoutes, createEventsRoutes, createSessionsRoutes, createTracesRoutes, createAnalyticsRoutes } from './routes';
 
@@ -22,7 +22,6 @@ try {
 const logger = new Logger(config.logLevel);
 
 // Service instances — populated during initialization
-let kafkaService: KafkaService | null = null;
 let redisService: RedisService | null = null;
 let databaseService: DatabaseService | null = null;
 
@@ -39,14 +38,13 @@ app.use(
   '/api/v1/events',
   createEventsRoutes(
     () => databaseService,
-    () => kafkaService,
     () => redisService,
     logger
   )
 );
 app.use(
   '/api/v1/traces',
-  createTracesRoutes(() => databaseService, () => kafkaService, logger)
+  createTracesRoutes(() => databaseService, logger)
 );
 app.use(
   '/api/v1/analytics',
@@ -69,14 +67,6 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   server.close(async () => {
     logger.info('HTTP server closed');
-
-    if (kafkaService) {
-      try {
-        await kafkaService.disconnect();
-      } catch (error) {
-        logger.error('Error closing Kafka:', error);
-      }
-    }
 
     if (redisService) {
       try {
@@ -111,14 +101,6 @@ process.on('unhandledRejection', (reason) => logger.error('Unhandled promise rej
 process.on('uncaughtException', (err) => { logger.error('Uncaught exception:', err); process.exit(1); });
 
 async function initializeServices(): Promise<void> {
-  kafkaService = new KafkaService(logger);
-  try {
-    await kafkaService.initialize();
-  } catch (error) {
-    logger.warn('Kafka initialization failed, continuing without it:', error);
-    kafkaService = null;
-  }
-
   redisService = new RedisService(logger);
   try {
     await redisService.initialize();
@@ -136,7 +118,7 @@ async function initializeServices(): Promise<void> {
   }
 
   logger.info(
-    `Services: Kafka=${!!kafkaService}, Redis=${!!redisService}, DB=${!!databaseService}`
+    `Services: Redis=${!!redisService}, DB=${!!databaseService}`
   );
 }
 
@@ -148,9 +130,8 @@ const server = app.listen(config.port, config.host, () => {
 
   logger.info(`Server running at http://${config.host}:${config.port}`);
   logger.info(`Health: http://localhost:${config.port}/health`);
-  logger.info(`Ingest: POST http://localhost:${config.port}/api/v1/events/batch`);
-  logger.info(`Query:  GET  http://localhost:${config.port}/api/v1/events`);
+  logger.info(`Traces: POST http://localhost:${config.port}/api/v1/traces`);
+  logger.info(`Query:  GET  http://localhost:${config.port}/api/v1/sessions`);
 });
 
 export default app;
-

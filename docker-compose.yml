@@ -21,41 +21,6 @@ services:
       retries: 10
       start_period: 10s
 
-  # Message Broker - Kafka with KRaft (no Zookeeper needed)
-  kafka:
-    image: docker.io/confluentinc/cp-kafka:7.5.0
-    container_name: kafka
-    ports:
-      - "9092:9092"
-      - "29092:29092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
-      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_HOURS: 24
-      CLUSTER_ID: SbKYIzP0R6efgbMcteBElg
-      KAFKA_NODE_ID: 1
-      # Message Size Limits (Issue #7)
-      KAFKA_MESSAGE_MAX_BYTES: '286720'           # 280KB = 256KB + 10% overhead
-      KAFKA_REPLICA_FETCH_MAX_BYTES: '286720'
-      KAFKA_MAX_REQUEST_SIZE: '286720'
-    networks:
-      - remi-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-
   # Cache Layer - Redis
   redis:
     image: docker.io/library/redis:7-alpine
@@ -104,10 +69,6 @@ services:
       # Read Replica — set to primary for dev (replica streaming not configured)
       DB_READ_HOST: postgres-primary
       DB_READ_PORT: 5432
-      # Kafka
-      KAFKA_BROKERS: kafka:29092
-      KAFKA_EVENT_TOPIC: remi-events
-      KAFKA_SESSION_TOPIC: remi-sessions
       # Redis
       REDIS_HOST: redis-cache
       REDIS_PORT: 6379
@@ -117,15 +78,12 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: remi-backend
       OTEL_TRACES_SAMPLER: always_on
-      KAFKAJS_NO_PARTITIONER_WARNING: "1"
       # LLM-as-a-judge (span analysis feature)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     depends_on:
       postgres-primary:
-        condition: service_healthy
-      kafka:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -159,50 +117,6 @@ services:
       NODE_ENV: production
     depends_on:
       - backend
-    restart: unless-stopped
-    networks:
-      - remi-network
-
-  # Background Worker - Kafka Consumer
-  worker:
-    build:
-      context: ./remi-worker
-      dockerfile: Dockerfile
-    container_name: remi-worker
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 128M
-    environment:
-      KAFKA_BROKERS: kafka:29092
-      KAFKA_EVENT_TOPIC: remi-events
-      KAFKA_SESSION_TOPIC: remi-sessions
-      KAFKA_GROUP_ID: remi-worker-group
-      # Database
-      DB_HOST: postgres-primary
-      DB_PORT: 5432
-      DB_USER: remi_user
-      DB_PASSWORD: remi_password
-      DB_NAME: remi_db
-      # Redis
-      REDIS_HOST: redis-cache
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: redis_password
-      # Logging
-      LOG_LEVEL: INFO
-      # OpenTelemetry
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      OTEL_SERVICE_NAME: remi-worker
-      OTEL_TRACES_SAMPLER: always_on
-    depends_on:
-      postgres-primary:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     restart: unless-stopped
     networks:
       - remi-network

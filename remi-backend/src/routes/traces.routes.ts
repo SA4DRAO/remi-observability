@@ -30,7 +30,6 @@ function createSessionId(): string {
 
 export function createTracesRoutes(
   getDatabase: () => DatabaseService | null,
-  _getKafka: () => unknown,
   logger: Logger
 ): Router {
   const router = Router();

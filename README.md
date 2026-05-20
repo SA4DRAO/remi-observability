@@ -2,7 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](remi-backend/)
-[![Python](https://img.shields.io/badge/Python-3.9+-yellow)](remi-worker/)
 [![React](https://img.shields.io/badge/React-19-61DAFB)](remi/remi/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-native-f5a800)](https://opentelemetry.io/)
 
@@ -12,8 +11,6 @@ Remi is built with:
 
 [![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?logo=typescript&logoColor=white)](remi-backend/)
 [![React](https://img.shields.io/badge/-React-61DAFB?logo=react&logoColor=black)](remi/remi/)
-[![Python](https://img.shields.io/badge/-Python-3776AB?logo=python&logoColor=white)](remi-worker/)
-[![Kafka](https://img.shields.io/badge/-Kafka-231F20?logo=apachekafka&logoColor=white)](docker-compose.yml)
 [![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?logo=postgresql&logoColor=white)](scripts/init-db.sql)
 [![Redis](https://img.shields.io/badge/-Redis-DC382D?logo=redis&logoColor=white)](docker-compose.yml)
 
@@ -50,7 +47,7 @@ Remi is built with:
 ```
 ┌─────────────────────────────────────────────────┐
 │  LangChain / LangGraph / any OTLP source        │
-│  examples/otel_setup.py · RemiCallback          │
+│  examples/otel_setup.py                         │
 └──────────────────────┬──────────────────────────┘
                        │ OTLP HTTP spans
                        ▼
@@ -62,27 +59,18 @@ Remi is built with:
               ┌────────────────┐
               │  remi-backend  │ :3100  Express 5 / TypeScript / Bun
               │  · Zod schema  │
-              │  · Kafka prod. │
               │  · Redis cache │
-              └──┬─────────────┘
-                 │ Kafka topic: remi-events
-                 ▼
-         ┌──────────────┐
-         │  remi-worker │      Python asyncio / AIOKafkaConsumer
-         │  · batch     │
-         │  · dedup     │
-         │  · metrics   │
-         └──────┬───────┘
-                │ asyncpg
-                ▼
-          ┌──────────┐
-          │ Postgres │ :5432
-          └──────────┘
-                ▲
-                │ REST API
-         ┌──────────────┐
-         │  remi (UI)   │ :3000  React 19 / Vite / TanStack Query
-         └──────────────┘
+              └───────┬────────┘
+                      │ asyncpg
+                      ▼
+               ┌──────────┐
+               │ Postgres │ :5432
+               └──────────┘
+                     ▲
+                     │ REST API
+              ┌──────────────┐
+              │  remi (UI)   │ :3000  React 19 / Vite / TanStack Query
+              └──────────────┘
 ```
 
 ---
@@ -94,7 +82,6 @@ Remi is built with:
 | Dashboard UI    | 3000      | Observability frontend           |
 | Backend API     | 3100      | REST API + OTLP ingest           |
 | Postgres        | 5432      | Session and trace storage        |
-| Kafka           | 9092      | Event streaming (KRaft, no ZK)   |
 | Redis           | 6379      | Cache layer                      |
 | Jaeger UI       | 16686     | Distributed trace viewer         |
 | OTel Collector  | 4318      | OTLP HTTP receiver               |
@@ -116,11 +103,11 @@ cp .env.example .env
 #   OPENAI_API_KEY=sk-...
 
 # 3. Start all services
-#    First run builds images and initialises the database (~2 minutes)
+#    First run builds images and initialises the database (~30 seconds)
 docker-compose up -d
 # or: podman-compose up -d
 
-# 4. Wait for services to be healthy (~60 seconds for Kafka)
+# 4. Wait for services to be healthy
 docker-compose ps
 
 # 5. Verify the backend is up
@@ -234,24 +221,11 @@ bun run lint
 bun run build
 ```
 
-### Worker (`remi-worker/`)
-
-```bash
-cd remi-worker
-pip install -e ".[dev]"
-
-python -m remi_worker  # Run directly
-pytest                 # All tests
-pytest tests/test_consumer.py   # Single file
-mypy src/
-```
-
 ### Useful Commands
 
 ```bash
 # Tail logs for a specific service
 docker-compose logs -f backend
-docker-compose logs -f worker
 
 # Rebuild a single service after a code change
 docker-compose up -d --build backend
@@ -273,9 +247,7 @@ Remi would not be possible without these projects:
 |-----------|---------|
 | OTLP tracing | [OpenTelemetry](https://opentelemetry.io/) |
 | LangChain integration | [LangChain](https://github.com/langchain-ai/langchain) |
-| Kafka client (backend) | [KafkaJS](https://github.com/tulios/kafkajs) |
-| Kafka client (worker) | [aiokafka](https://github.com/aio-libs/aiokafka) |
-| Database client | [asyncpg](https://github.com/MagicStack/asyncpg) |
+| Database client | [node-postgres](https://github.com/brianc/node-postgres) |
 | UI components | [shadcn/ui](https://ui.shadcn.com/) + [Radix UI](https://www.radix-ui.com/) |
 | Data fetching | [TanStack Query](https://tanstack.com/query) |
 | Schema validation | [Zod](https://zod.dev/) |

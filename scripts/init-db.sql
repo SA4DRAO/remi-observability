@@ -13,36 +13,6 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ---------------------------------------------------------------------------
--- Helper function: recursively merge two JSONB objects by summing numeric
--- leaf values. Used for session_metrics upserts in the worker.
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION jsonb_add_counts(a JSONB, b JSONB)
-RETURNS JSONB AS $$
-DECLARE
-  result JSONB := COALESCE(a, '{}'::jsonb);
-  k      TEXT;
-  v      JSONB;
-BEGIN
-  FOR k, v IN SELECT * FROM jsonb_each(COALESCE(b, '{}'::jsonb)) LOOP
-    IF jsonb_typeof(v) = 'number' THEN
-      result := jsonb_set(result, ARRAY[k],
-        to_jsonb(COALESCE((result->>k)::numeric, 0) + (v#>>'{}')::numeric));
-    ELSIF jsonb_typeof(v) = 'object' THEN
-      IF result ? k THEN
-        result := jsonb_set(result, ARRAY[k], jsonb_add_counts(result->k, v));
-      ELSE
-        result := result || jsonb_build_object(k, v);
-      END IF;
-    ELSIF jsonb_typeof(v) = 'boolean' THEN
-      result := jsonb_set(result, ARRAY[k],
-        to_jsonb(COALESCE((result->>k)::boolean, false) OR (v#>>'{}')::boolean));
-    END IF;
-  END LOOP;
-  RETURN result;
-END;
-$$ LANGUAGE plpgsql IMMUTABLE;
-
--- ---------------------------------------------------------------------------
 -- 1. conversations — one row per logical multi-turn conversation
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS conversations (
@@ -558,46 +528,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- ---------------------------------------------------------------------------
--- Legacy tables — used by the SDK event ingest path (POST /api/v1/events/batch)
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id          SERIAL       PRIMARY KEY,
-    session_id  VARCHAR(255) UNIQUE NOT NULL,
-    name        VARCHAR(255),
-    metadata    JSONB,
-    org_id      VARCHAR(255),
-    agent_id    VARCHAR(255),
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_org_id     ON sessions(org_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at DESC);
-
-CREATE TABLE IF NOT EXISTS events (
-    id            BIGSERIAL     PRIMARY KEY,
-    session_id    VARCHAR(255)  NOT NULL,
-    event_type    VARCHAR(100)  NOT NULL,
-    event_data    JSONB         NOT NULL DEFAULT '{}',
-    seq           INTEGER,
-    org_id        VARCHAR(255),
-    agent_id      VARCHAR(255),
-    run_id        TEXT,
-    parent_run_id TEXT,
-    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session_seq_dedup
-  ON events(session_id, seq)
-  WHERE seq IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_events_session_created ON events(session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_events_event_type      ON events(event_type);
-CREATE INDEX IF NOT EXISTS idx_events_org_agent       ON events(org_id, agent_id);
-
 CREATE TABLE IF NOT EXISTS trace_session_correlations (
     trace_id   TEXT          PRIMARY KEY,
     session_id VARCHAR(255)  NOT NULL,
@@ -628,35 +558,3 @@ CREATE INDEX IF NOT EXISTS idx_provider_alias_correlations_session_id
 CREATE INDEX IF NOT EXISTS idx_provider_alias_correlations_trace_id
   ON provider_alias_correlations(trace_id);
 
-CREATE TABLE IF NOT EXISTS session_metrics (
-    id                     BIGSERIAL     PRIMARY KEY,
-    session_id             VARCHAR(255)  UNIQUE NOT NULL,
-    org_id                 VARCHAR(255),
-    agent_id               VARCHAR(255),
-    total_events           INTEGER       NOT NULL DEFAULT 0,
-    llm_calls              INTEGER       NOT NULL DEFAULT 0,
-    tool_calls             INTEGER       NOT NULL DEFAULT 0,
-    error_count            INTEGER       NOT NULL DEFAULT 0,
-    prompt_tokens          BIGINT        NOT NULL DEFAULT 0,
-    completion_tokens      BIGINT        NOT NULL DEFAULT 0,
-    total_tokens           BIGINT        NOT NULL DEFAULT 0,
-    estimated_cost_usd     NUMERIC(18,8) NOT NULL DEFAULT 0,
-    cost_status            VARCHAR(20)   NOT NULL DEFAULT 'estimated',
-    total_llm_duration_ms  BIGINT        NOT NULL DEFAULT 0,
-    total_tool_duration_ms BIGINT        NOT NULL DEFAULT 0,
-    max_agent_iteration    INTEGER       NOT NULL DEFAULT 0,
-    finish_reasons         JSONB         NOT NULL DEFAULT '{}',
-    tool_usage             JSONB         NOT NULL DEFAULT '{}',
-    model_usage            JSONB         NOT NULL DEFAULT '{}',
-    event_type_counts      JSONB         NOT NULL DEFAULT '{}',
-    first_event_at         TIMESTAMPTZ,
-    last_event_at          TIMESTAMPTZ,
-    is_complete            BOOLEAN       NOT NULL DEFAULT FALSE,
-    has_error              BOOLEAN       NOT NULL DEFAULT FALSE,
-    created_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_session_metrics_org_agent   ON session_metrics(org_id, agent_id);
-CREATE INDEX IF NOT EXISTS idx_session_metrics_last_event  ON session_metrics(last_event_at DESC);
-CREATE INDEX IF NOT EXISTS idx_session_metrics_has_error   ON session_metrics(has_error);

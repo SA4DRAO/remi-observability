@@ -290,59 +290,24 @@ export class DatabaseService {
     return map;
   }
 
-  async storeEvent(
+  async createSessionV2(
     sessionId: string,
-    eventType: string,
-    eventData: Record<string, unknown>,
-    seq?: number | null,
     orgId?: string | null,
-    agentId?: string | null
-  ): Promise<number> {
-    const result = await this.query(
-      `INSERT INTO events (session_id, event_type, event_data, seq, org_id, agent_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id`,
-      [sessionId, eventType, JSON.stringify(eventData), seq ?? null, orgId ?? null, agentId ?? null]
-    );
-    const row = (result.rows[0] as { id: number } | undefined);
-    if (!row) throw new Error('storeEvent: no id returned');
-    this.logger.debug('Stored event row', { sessionId, eventType, seq: seq ?? null, orgId: orgId ?? null, agentId: agentId ?? null, eventId: row.id });
-    return row.id;
-  }
-
-  async storeSession(
-    sessionId: string,
-    name: string | null,
-    metadata: Record<string, unknown>,
-    orgId?: string | null,
-    agentId?: string | null
+    agentId?: string | null,
+    agentVersion?: string | null,
+    attributes?: Record<string, unknown> | null
   ): Promise<void> {
     await this.query(
-      `INSERT INTO sessions (session_id, name, metadata, org_id, agent_id)
+      `INSERT INTO sessions_v2 (session_id, org_id, agent_id, agent_version, metadata)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (session_id) DO UPDATE
-       SET metadata   = $3,
-           org_id     = COALESCE(EXCLUDED.org_id,   sessions.org_id),
-           agent_id   = COALESCE(EXCLUDED.agent_id, sessions.agent_id),
-           updated_at = NOW()`,
-      [sessionId, name, JSON.stringify(metadata), orgId ?? null, agentId ?? null]
+       ON CONFLICT (session_id) DO NOTHING`,
+      [sessionId, orgId ?? null, agentId ?? null, agentVersion ?? null, attributes ? JSON.stringify(attributes) : null]
     );
-    this.logger.debug('Upserted session row', {
+    this.logger.debug('Created session_v2 row', {
       sessionId,
-      hasName: !!name,
       orgId: orgId ?? null,
       agentId: agentId ?? null,
-      metadataKeys: Object.keys(metadata || {}).slice(0, 20),
     });
-  }
-
-  async getSession(sessionId: string): Promise<Record<string, unknown> | null> {
-    const result = await this.queryRead(
-      `SELECT id, session_id, name, metadata, org_id, agent_id, created_at, updated_at
-       FROM sessions WHERE session_id = $1`,
-      [sessionId]
-    );
-    return (result.rows[0] as Record<string, unknown> | undefined) ?? null;
   }
 
   async getTraceSessionMapping(traceId: string): Promise<TraceSessionMapping | null> {

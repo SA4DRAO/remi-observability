@@ -163,7 +163,7 @@ export function createSessionsRoutes(
       const db = getDatabase();
       if (db) {
         try {
-          await db.storeSession(sessionId, name ?? null, metadata ?? {}, resolvedOrgId, resolvedAgentId);
+          await db.createSessionV2(sessionId, resolvedOrgId, resolvedAgentId, null, metadata ?? null);
         } catch (dbError) {
           logger.warn('Failed to store session in database:', dbError);
         }

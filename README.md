@@ -106,25 +106,27 @@ Remi is built with:
 **Prerequisites:** Docker or Podman with Compose support (no other dependencies needed)
 
 ```bash
-# 1. Clone and configure
+# 1. Clone
 git clone https://github.com/SA4DRAO/remi-observability.git
 cd remi-observability
-cp .env.example .env
-# Edit .env — set OPENAI_API_KEY (everything else has defaults)
 
-# 2. Start all services
+# 2. Configure environment
+cp .env.example .env
+# Open .env and set your OpenAI API key — that's the only required change:
+#   OPENAI_API_KEY=sk-...
+
+# 3. Start all services
 #    First run builds images and initialises the database (~2 minutes)
 docker-compose up -d
-# or:
-podman-compose up -d
+# or: podman-compose up -d
 
-# 3. Wait for services to be healthy (~60 seconds for Kafka)
+# 4. Wait for services to be healthy (~60 seconds for Kafka)
 docker-compose ps
 
-# 4. Verify the backend is up
+# 5. Verify the backend is up
 curl http://localhost:3100/health
 
-# 5. Open the dashboard
+# 6. Open the dashboard
 #    http://localhost:3000
 ```
 
@@ -134,28 +136,72 @@ curl http://localhost:3100/health
 
 ---
 
+## Environment Variables
+
+### Root `.env` (stack config)
+
+Copy `.env.example` to `.env`. The only required variable is:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENAI_API_KEY` | **Yes** | — | Powers the LLM-as-a-judge span analysis feature and the example agents |
+| `REMI_API_KEY` | No | `test-key-123` | Bearer token used by all services to authenticate requests |
+| `OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | Swap for any OpenAI-compatible endpoint (Anthropic, local Ollama, etc.) |
+| `OPENAI_MODEL` | No | `gpt-4o-mini` | Model used for span analysis and example agents |
+
+> The dashboard frontend reads `REMI_API_KEY` as `VITE_API_KEY` — both are set automatically from the root `.env` via docker-compose.
+
+### `examples/.env` (example agents)
+
+The example agents read from their own `.env` inside `examples/`. Copy from root and add the Remi connection vars:
+
+```bash
+cp .env examples/.env   # copies OPENAI_API_KEY
+# examples/.env already has the right defaults — no edits needed for a local stack:
+#   REMI_API_KEY=test-key-123
+#   REMI_BACKEND_URL=http://localhost:3100
+#   OPENAI_BASE_URL=https://api.openai.com/v1
+#   OPENAI_MODEL=gpt-4o-mini
+```
+
+Or create `examples/.env` manually:
+
+```bash
+OPENAI_API_KEY=sk-...          # your key
+REMI_API_KEY=test-key-123      # must match REMI_API_KEY in root .env
+REMI_BACKEND_URL=http://localhost:3100
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
+
+---
+
 ## Running Example Agents
 
 The `examples/` directory contains runnable LangChain agents that send traces through the full Remi pipeline. After each run, refresh the dashboard to see the new session.
 
 ```bash
 cd examples
+
+# First-time setup
 python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Set your OpenAI key (already set if you loaded .env)
-export OPENAI_API_KEY=your-key-here
+# Configure (see Environment Variables section above)
+cp ../.env .env              # copies OPENAI_API_KEY from root
+# Add the Remi connection vars if not already present:
+echo 'REMI_API_KEY=test-key-123' >> .env
+echo 'REMI_BACKEND_URL=http://localhost:3100' >> .env
 
-# Run the examples
+# Run the examples (stack must be running)
 python simple_chain_agent.py       # Two-step LCEL pipeline — good starting point
-python research_agent.py           # ReAct agent with web search tools
-python customer_support_agent.py   # Multi-turn conversation with memory
-python code_review_agent.py        # Tool-heavy code analysis agent
-python multi_agent_supervisor.py   # LangGraph supervisor + subagents
-python tool_failure.py             # Deliberate error — tests the error-path trace view
+python research_agent.py           # ReAct agent with parallel tool calls
+python customer_support_agent.py   # Customer support agent with ticket workflows
+python code_review_agent.py        # Tool-heavy StateGraph code analysis agent
+python multi_agent_supervisor.py   # Two-agent pipeline: analyst → writer
 ```
 
-Sessions appear in the dashboard within a few seconds of each script exiting.
+Sessions appear in the dashboard within a few seconds of each script exiting. Each agent has a distinct name (`simple-chain-agent`, `research-agent`, etc.) visible in the dashboard's agent filter.
 
 ---
 

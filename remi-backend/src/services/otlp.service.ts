@@ -1,11 +1,42 @@
 import type { OtlpPayload, OtlpAttribute, OtlpAttributeValue } from '../types/validation';
 
+// 'openrouter' is pre-declared for a future dedicated detection path in authenticate().
+// Currently all OpenRouter traffic arrives via the webhook secret and is tagged 'webhook'.
+export type OtlpSource = 'webhook' | 'sdk' | 'openrouter';
+
+export interface OtlpSpanData {
+  // Always present
+  trace_id: string;
+  span_id: string;
+  span_name: string;
+  span_category: string;
+  attributes: Record<string, unknown>;
+  source: OtlpSource;
+  provider: string | null;
+
+  // Conditionally present
+  parent_span_id?: string;
+  span_kind?: number;
+  status_code?: number;
+  status_message?: string;
+  start_time_ns?: string;
+  end_time_ns?: string;
+  duration_ms?: number;
+  scope_name?: string;
+  scope_version?: string;
+
+  // LLM-only
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  model?: string;
+  finish_reasons?: string[];
+
+  // Tool-only
+  tool_name?: string;
+}
+
 export interface NormalizedEvent {
   event_type: 'otel_span';
-  data: Record<string, unknown>;
-  _seq?: number;
-  run_id?: string;
-  parent_run_id?: string;
+  data: OtlpSpanData;
   timestamp?: string;
 }
 
@@ -17,7 +48,7 @@ export interface NormalizedBatch {
   conversation_id?: string;
   prompt_version?: string;
   final_output?: string;
-  source: 'webhook' | 'sdk';
+  source: OtlpSource;
   events: NormalizedEvent[];
 }
 
@@ -25,6 +56,10 @@ export interface TraceIdentity {
   sessionId?: string;
   orgId?: string;
   agentId?: string;
+}
+
+export interface ResolvedTraceIdentity extends TraceIdentity {
+  sessionId: string;
 }
 
 export type ProviderAliasType =
@@ -513,9 +548,9 @@ function nanosToMs(startNs: string, endNs: string): number {
  */
 export function normalizeOtlpPayload(
   payload: OtlpPayload,
-  source: 'webhook' | 'sdk',
+  source: OtlpSource,
   headerIdentity: { orgId?: string; agentId?: string } = {},
-  resolvedTraceIdentities: ReadonlyMap<string, TraceIdentity> = new Map<string, TraceIdentity>()
+  resolvedTraceIdentities: ReadonlyMap<string, ResolvedTraceIdentity> = new Map<string, ResolvedTraceIdentity>()
 ): NormalizedBatch[] {
   const batchMap = new Map<string, NormalizedBatch>();
   const traceIdentityMap = new Map<string, TraceIdentity>();
@@ -577,33 +612,34 @@ export function normalizeOtlpPayload(
           timestamp = nanosToIso(span.startTimeUnixNano);
         }
 
-        const data: Record<string, unknown> = {
+        const data: OtlpSpanData = {
           trace_id: span.traceId,
           span_id: span.spanId,
           span_name: span.name,
           span_category: spanCategory,
           attributes: spanAttrs,
           source,
+          provider: detectProvider(spanAttrs) ?? detectProvider(resourceAttrs) ?? null,
         };
 
-        if (span.parentSpanId !== undefined) data['parent_span_id'] = span.parentSpanId;
-        if (span.kind !== undefined) data['span_kind'] = span.kind;
+        if (span.parentSpanId !== undefined) data.parent_span_id = span.parentSpanId;
+        if (span.kind !== undefined) data.span_kind = span.kind;
         // OTLP status codes: 0=unset, 1=ok, 2=error
-        if (span.status?.code !== undefined) data['status_code'] = span.status.code;
-        if (span.status?.message !== undefined) data['status_message'] = span.status.message;
-        if (span.startTimeUnixNano !== undefined) data['start_time_ns'] = span.startTimeUnixNano;
-        if (span.endTimeUnixNano !== undefined) data['end_time_ns'] = span.endTimeUnixNano;
-        if (durationMs !== undefined) data['duration_ms'] = durationMs;
-        if (scopeName !== undefined) data['scope_name'] = scopeName;
-        if (scopeVersion !== undefined) data['scope_version'] = scopeVersion;
+        if (span.status?.code !== undefined) data.status_code = span.status.code;
+        if (span.status?.message !== undefined) data.status_message = span.status.message;
+        if (span.startTimeUnixNano !== undefined) data.start_time_ns = span.startTimeUnixNano;
+        if (span.endTimeUnixNano !== undefined) data.end_time_ns = span.endTimeUnixNano;
+        if (durationMs !== undefined) data.duration_ms = durationMs;
+        if (scopeName !== undefined) data.scope_name = scopeName;
+        if (scopeVersion !== undefined) data.scope_version = scopeVersion;
 
         // Pre-extract LLM-specific semantic fields — worker reads these directly
         if (spanCategory === 'llm') {
-          data['usage'] = extractUsage(spanAttrs);
+          data.usage = extractUsage(spanAttrs);
           const model = getStringAttr(spanAttrs, ...MODEL_KEYS);
-          if (model !== undefined) data['model'] = model;
+          if (model !== undefined) data.model = model;
           const finishReasons = extractFinishReasons(spanAttrs);
-          if (finishReasons.length > 0) data['finish_reasons'] = finishReasons;
+          if (finishReasons.length > 0) data.finish_reasons = finishReasons;
         }
 
         // Pre-extract tool name for tool spans
@@ -617,14 +653,12 @@ export function normalizeOtlpPayload(
             toolName = span.name.substring('execute_tool '.length).trim();
           }
 
-          data['tool_name'] = toolName ?? span.name;
+          data.tool_name = toolName ?? span.name;
         }
 
         const event: NormalizedEvent = {
           event_type: 'otel_span',
           data,
-          run_id: span.spanId,
-          ...(span.parentSpanId !== undefined ? { parent_run_id: span.parentSpanId } : {}),
           ...(timestamp !== undefined ? { timestamp } : {}),
         };
 

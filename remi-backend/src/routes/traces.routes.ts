@@ -10,15 +10,25 @@ import {
   collectTraceResolutionCandidates,
   normalizeOtlpPayload,
 } from '../services/otlp.service';
-import type { TraceIdentity } from '../services/otlp.service';
+import type { ResolvedTraceIdentity, OtlpSource } from '../services/otlp.service';
 import type { PersistOtlpV2Span } from '../services/database.service';
+
+function setOtlpSource(res: Response, s: OtlpSource): void {
+  res.locals['otlpSource'] = s;
+}
+
+function getOtlpSource(res: Response): OtlpSource {
+  const v = res.locals['otlpSource'];
+  if (v === 'webhook' || v === 'sdk' || v === 'openrouter') return v;
+  return 'sdk';
+}
 
 function createTraceIdentity(
   sessionId: string,
   orgId?: string,
   agentId?: string
-): TraceIdentity {
-  const identity: TraceIdentity = { sessionId };
+): ResolvedTraceIdentity {
+  const identity: ResolvedTraceIdentity = { sessionId };
   if (orgId !== undefined) identity.orgId = orgId;
   if (agentId !== undefined) identity.agentId = agentId;
   return identity;
@@ -57,7 +67,7 @@ export function createTracesRoutes(
       typeof incomingWebhookSecret === 'string' &&
       incomingWebhookSecret === webhookSecret
     ) {
-      res.locals['otlpSource'] = 'webhook';
+      setOtlpSource(res, 'webhook');
       next();
       return;
     }
@@ -67,7 +77,7 @@ export function createTracesRoutes(
       typeof incomingApiKey === 'string' &&
       incomingApiKey === apiKey
     ) {
-      res.locals['otlpSource'] = 'sdk';
+      setOtlpSource(res, 'sdk');
       next();
       return;
     }
@@ -80,7 +90,7 @@ export function createTracesRoutes(
     authenticate,
     validateBody(OtlpPayloadSchema),
     async (req: Request, res: Response): Promise<void> => {
-      const source = (res.locals['otlpSource'] as 'webhook' | 'sdk') ?? 'sdk';
+      const source = getOtlpSource(res);
       const requestId = res.getHeader('x-request-id');
       const reqId = typeof requestId === 'string' ? requestId : 'n/a';
 
@@ -124,7 +134,7 @@ export function createTracesRoutes(
       const filteredPayload = { ...payload, resourceSpans: filteredResourceSpans };
 
       const traceCandidates = collectTraceResolutionCandidates(filteredPayload);
-      const traceResolutions = new Map<string, TraceIdentity>();
+      const traceResolutions = new Map<string, ResolvedTraceIdentity>();
 
       for (const candidate of traceCandidates) {
         let traceMapping = null;
@@ -200,60 +210,34 @@ export function createTracesRoutes(
 
         for (const event of batch.events) {
           const d = event.data;
-          const traceId = typeof d['trace_id'] === 'string' ? d['trace_id'] : 'unknown';
-          const spanId = typeof d['span_id'] === 'string' ? d['span_id'] : '';
-          const spanName = typeof d['span_name'] === 'string' ? d['span_name'] : '';
-          const kind = typeof d['span_kind'] === 'number' ? d['span_kind'] : 0;
-          const statusCode = typeof d['status_code'] === 'number' ? d['status_code'] : 0;
-          const statusMessage = typeof d['status_message'] === 'string' ? d['status_message'] : null;
-          const parentSpanId = typeof d['parent_span_id'] === 'string' ? d['parent_span_id'] : null;
-          const startTimeNs = typeof d['start_time_ns'] === 'string' ? BigInt(d['start_time_ns']) :
-                              typeof d['start_time_ns'] === 'number' ? d['start_time_ns'] : 0;
-          const endTimeNs = typeof d['end_time_ns'] === 'string' ? BigInt(d['end_time_ns']) :
-                            typeof d['end_time_ns'] === 'number' ? d['end_time_ns'] : 0;
 
-          const model = typeof d['model'] === 'string' && d['model'].length > 0 ? d['model'] : null;
+          const startTimeNs = d.start_time_ns !== undefined ? BigInt(d.start_time_ns) : 0n;
+          const endTimeNs   = d.end_time_ns   !== undefined ? BigInt(d.end_time_ns)   : 0n;
 
-          const rawAttrs = d['attributes'];
-          const provider = rawAttrs && typeof rawAttrs === 'object' && !Array.isArray(rawAttrs)
-            ? (() => {
-                const a = rawAttrs as Record<string, unknown>;
-                for (const key of ['gen_ai.system', 'llm.system', 'llm.provider', 'openinference.provider', 'provider']) {
-                  const val = a[key];
-                  if (typeof val === 'string' && val.length > 0) return val;
-                }
-                return null;
-              })()
+          const usage = d.usage
+            ? {
+                promptTokens:     d.usage.prompt_tokens,
+                completionTokens: d.usage.completion_tokens,
+                totalTokens:      d.usage.total_tokens,
+              }
             : null;
 
-          const rawUsage = d['usage'];
-          let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null;
-          if (rawUsage && typeof rawUsage === 'object' && !Array.isArray(rawUsage)) {
-            const u = rawUsage as Record<string, unknown>;
-            const built: { promptTokens?: number; completionTokens?: number; totalTokens?: number } = {};
-            if (typeof u['prompt_tokens'] === 'number') built.promptTokens = u['prompt_tokens'];
-            if (typeof u['completion_tokens'] === 'number') built.completionTokens = u['completion_tokens'];
-            if (typeof u['total_tokens'] === 'number') built.totalTokens = u['total_tokens'];
-            usage = built;
-          }
-
           const span: PersistOtlpV2Span = {
-            spanId,
-            parentSpanId,
-            name: spanName,
-            kind,
-            statusCode,
-            statusMessage,
-            model,
-            provider,
+            spanId:        d.span_id,
+            parentSpanId:  d.parent_span_id ?? null,
+            name:          d.span_name,
+            kind:          d.span_kind ?? 0,
+            statusCode:    d.status_code ?? 0,
+            statusMessage: d.status_message ?? null,
+            model:         d.model ?? null,
+            provider:      d.provider,
             startTimeNs,
             endTimeNs,
-            attributes: rawAttrs && typeof rawAttrs === 'object' && !Array.isArray(rawAttrs)
-              ? (rawAttrs as Record<string, unknown>)
-              : {},
+            attributes:    d.attributes,
             usage,
           };
 
+          const traceId = d.trace_id;
           const existing = traceSpanMap.get(traceId);
           if (existing) {
             existing.push(span);

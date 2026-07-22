@@ -1,0 +1,37 @@
+server:
+  port: 3100
+
+spring:
+  # Two datasources (ClickHouse signal + Postgres identity) are built manually
+  # in DataSourceConfig, so the single-datasource autoconfig is excluded.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.liquibase.LiquibaseAutoConfiguration
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+
+remi:
+  cors-origins: ${CORS_ORIGINS:http://localhost:3000,http://localhost:5173}
+  clickhouse:
+    url: jdbc:clickhouse://${CLICKHOUSE_HOST:clickhouse}:${CLICKHOUSE_PORT:8123}/${CLICKHOUSE_DB:remi}
+    username: ${CLICKHOUSE_USER:remi_user}
+    password: ${CLICKHOUSE_PASSWORD:remi_password}
+  identity:
+    url: jdbc:postgresql://${POSTGRES_HOST:postgres-primary}:${POSTGRES_PORT:5432}/${POSTGRES_DB:remi_db}
+    username: ${POSTGRES_USER:remi_user}
+    password: ${POSTGRES_PASSWORD:remi_password}
+  collector-endpoint: ${COLLECTOR_ENDPOINT:http://otel-collector:4318}
+  judge:
+    # Provider pairing is resolved in JudgeService: OpenRouter when its key is
+    # set, else direct OpenAI (base URL + model prefix adjusted accordingly).
+    base-url: ${JUDGE_BASE_URL:}
+    openrouter-key: ${OPENROUTER_API_KEY:}
+    openai-key: ${OPENAI_API_KEY:}
+    model: ${JUDGE_MODEL:openai/gpt-4o-mini}
+
+logging:
+  level:
+    com.remi: INFO

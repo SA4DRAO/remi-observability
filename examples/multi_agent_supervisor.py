@@ -28,7 +28,6 @@ from typing import Any
 
 import uuid
 
-import httpx
 from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -36,9 +35,7 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from opentelemetry.instrumentation.langchain import LangchainInstrumentor
 
-from otel_setup import configure_otel, set_session_id
 from tool_failure import configure_example_tools, maybe_fail_tool_call
 
 load_dotenv()
@@ -49,11 +46,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
-ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "supervisor-agent"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+BASE_URL = os.getenv("OPENAI_BASE_URL")  # None → api.openai.com
 
 ANALYST_SYSTEM_PROMPT = """\
 You are a data analyst. Use your tools to gather all requested metrics and facts.
@@ -222,15 +216,6 @@ SCENARIOS = [
 # ---------------------------------------------------------------------------
 
 
-def check_backend_health() -> bool:
-    try:
-        r = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
-        ok = r.status_code == 200
-        log.info("Backend health: %s", "OK" if ok else "FAIL")
-        return ok
-    except Exception as exc:
-        log.error("Backend health check failed: %s", exc)
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -239,18 +224,11 @@ def check_backend_health() -> bool:
 
 
 def main() -> None:
-    log.info("Starting Multi-Agent Pipeline demo (backend=%s, model=%s, org=%s, agent=%s)", BACKEND_URL, MODEL, ORG_ID, AGENT_ID)
-
-    if not check_backend_health():
-        log.warning("Backend unreachable — events may be lost")
-
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
+    if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set")
+    log.info("Starting multi-agent pipeline (model=%s)", MODEL)
 
-    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=openai_api_key)
-    tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
-    LangchainInstrumentor().instrument()
+    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, timeout=60, max_retries=2)
 
     # Stage 1: Analyst agent — LangGraph ReAct
     analyst_agent = create_react_agent(llm, ANALYST_TOOLS, prompt=ANALYST_SYSTEM_PROMPT)
@@ -268,42 +246,34 @@ def main() -> None:
 
     log.info("Processing %d scenarios", len(SCENARIOS))
 
-    try:
-        for scenario in SCENARIOS:
-            session_id = f"supervisor-{uuid.uuid4().hex[:8]}"
-            log.info("Scenario='%s'  session=%s", scenario.name, session_id)
-            set_session_id(session_id)
+    for scenario in SCENARIOS:
+        # Both stages share one thread_id, so the analyst's LangGraph trace and
+        # the writer's LCEL trace land in the SAME Remi session.
+        session_id = f"supervisor-{uuid.uuid4().hex[:8]}"
+        session_config = {"configurable": {"thread_id": session_id}}
+        log.info("Scenario='%s'  session=%s", scenario.name, session_id)
 
-            try:
-                with tracer.start_as_current_span(
-                    "remi.session",
-                    attributes={
-                        "remi.session_id": session_id,
-                    },
-                ):
-                    # ---- Stage 1: Analyst gathers facts ----
-                    analyst_result = analyst_agent.invoke(
-                        {"messages": [("user", scenario.analyst_question)]}
-                    )
-                    messages = analyst_result.get("messages", [])
-                    findings = messages[-1].content if messages else "(no analyst output)"
-                    log.info("Analyst stage complete (%d chars)", len(findings))
+        try:
+            # ---- Stage 1: Analyst gathers facts ----
+            analyst_result = analyst_agent.invoke(
+                {"messages": [("user", scenario.analyst_question)]},
+                config=session_config,
+            )
+            messages = analyst_result.get("messages", [])
+            findings = messages[-1].content if messages else "(no analyst output)"
+            log.info("Analyst stage complete (%d chars)", len(findings))
 
-                    # ---- Stage 2: Writer formats the report ----
-                    report = writer_chain.invoke(
-                        {"context": scenario.report_context, "findings": findings}
-                    )
-                    log.info("Report generated (%d chars): %s…", len(report), report[:150])
+            # ---- Stage 2: Writer formats the report ----
+            report = writer_chain.invoke(
+                {"context": scenario.report_context, "findings": findings},
+                config=session_config,
+            )
+            log.info("Report generated (%d chars): %s…", len(report), report[:150])
 
-            except Exception:
-                log.exception("Scenario='%s' failed", scenario.name)
+        except Exception:
+            log.exception("Scenario='%s' failed", scenario.name)
 
-        log.info("All scenarios processed")
-    
-    finally:
-        log.info("Flushing spans to backend...")
-        tracer_provider.shutdown()
-        log.info("Span export completed")
+    log.info("All scenarios processed")
 
 
 if __name__ == "__main__":

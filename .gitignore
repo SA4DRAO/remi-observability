@@ -28,5 +28,9 @@ package-lock.json
 # Marketing site (separate repo)
 remi-marketing/
 
+# Gradle build output
+remi-backend-spring/build/
+remi-backend-spring/.gradle/
+
 # Claude internal planning docs
 .claude/

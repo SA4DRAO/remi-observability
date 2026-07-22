@@ -1,6 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../utils/api-client";
-import type { SpanAttribute, SpanAttributesResponse } from "../types/v2";
+import type { SpanAttribute } from "../types";
+
+interface SpanAttributesResponse {
+  span_id: string;
+  attributes: Record<string, string>;
+}
 
 export function useSpanAttributes(spanId: string | null) {
   const { data, isPending, error } = useQuery<SpanAttribute[]>({
@@ -8,9 +13,10 @@ export function useSpanAttributes(spanId: string | null) {
     queryFn: async () => {
       if (!spanId) return [];
       const envelope = await apiClient.get<{ success: boolean; data: SpanAttributesResponse }>(
-        `/api/v1/events/spans/${spanId}/attributes`
+        `/api/v1/sessions/spans/${spanId}/attributes`
       );
-      return envelope.data.attributes;
+      // Convert Record<string,string> to SpanAttribute[]
+      return Object.entries(envelope.data.attributes).map(([key, value]) => ({ key, value }));
     },
     enabled: !!spanId,
     staleTime: 30_000,

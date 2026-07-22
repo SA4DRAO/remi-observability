@@ -1,7 +1,28 @@
-langchain-core>=0.3
-langchain-openai>=0.2
-langgraph>=0.2
+# Pinned exact, not floors: zero-code auto-instrumentation (LangchainInstrumentor
+# discovered and invoked via entry points, not a direct .instrument() call in our
+# code) turned out to be sensitive to the resolved langchain/langgraph/instrumentor
+# version combination — an open floor here previously resolved a langchain-core/
+# opentelemetry-instrumentation-langchain combination in a fresh Docker build that
+# silently produced zero LangChain spans (no error, LangchainInstrumentor just
+# never activated). These versions are verified end-to-end (real spans, correct
+# session grouping, correct token counts) both in a local venv and in the
+# examples/Dockerfile image. Bump deliberately, and re-verify with a real run —
+# check ClickHouse span/llm_call counts, not just "the script didn't crash" —
+# before trusting a new combination.
+langchain==1.3.1
+langchain-core==1.4.0
+langchain-openai==1.2.1
+langgraph==1.2.0
 httpx>=0.24
 python-dotenv>=1.0
-opentelemetry-sdk>=1.24.0
-opentelemetry-exporter-otlp-proto-http>=1.24.0
+opentelemetry-sdk==1.43.0
+opentelemetry-exporter-otlp-proto-http==1.43.0
+opentelemetry-instrumentation-langchain==0.60.0
+wrapt<2  # traceloop instrumentation passes module= kwarg; wrapt 2.x renamed it
+opentelemetry-instrumentation-system-metrics==0.64b0
+# Provides the `opentelemetry-instrument` launcher AND the default configurator
+# that actually wires env vars -> TracerProvider/exporter. Without this package,
+# `opentelemetry-instrument` silently no-ops (runs instrumentors against a
+# no-op provider) — it is not optional.
+opentelemetry-distro==0.64b0
+psutil>=5.9

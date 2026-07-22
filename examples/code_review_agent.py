@@ -1,7 +1,7 @@
 """Code review agent — explicit LangGraph StateGraph with conditional routing.
 
 Demonstrates:
-- Pure OTLP instrumentation via LangchainInstrumentor (no custom callback needed)
+- Pure OTLP instrumentation via zero-code auto-instrumentation (opentelemetry-instrument)
 - A custom StateGraph (NOT create_react_agent) with named nodes
 - Conditional edge routing based on LLM classification output
 
@@ -24,7 +24,6 @@ import os
 import uuid
 from typing import Any, Literal, TypedDict
 
-import httpx
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -32,9 +31,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from opentelemetry.instrumentation.langchain import LangchainInstrumentor
-
-from otel_setup import configure_otel, set_session_id
 
 load_dotenv()
 
@@ -44,11 +40,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
-ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "code-review-agent"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+BASE_URL = os.getenv("OPENAI_BASE_URL")  # None → api.openai.com
 
 
 # ---------------------------------------------------------------------------
@@ -166,15 +159,6 @@ def build_graph(llm: ChatOpenAI) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def check_backend_health() -> bool:
-    try:
-        r = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
-        ok = r.status_code == 200
-        log.info("Backend health: %s", "OK" if ok else "FAIL")
-        return ok
-    except Exception as exc:
-        log.error("Backend health check failed: %s", exc)
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -183,52 +167,33 @@ def check_backend_health() -> bool:
 
 
 def main() -> None:
-    log.info("Starting Code Review Agent (backend=%s, model=%s, org=%s, agent=%s)", BACKEND_URL, MODEL, ORG_ID, AGENT_ID)
-
-    if not check_backend_health():
-        log.warning("Backend unreachable — events may be lost")
-
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
+    if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set")
+    log.info("Starting code review agent (model=%s)", MODEL)
 
-    tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
-    # Auto-instrument all LangChain/LangGraph calls — no callback needed.
-    LangchainInstrumentor().instrument()
-
-    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=openai_api_key)
+    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, timeout=60, max_retries=2)
     compiled_graph = build_graph(llm)
 
     log.info("Reviewing %d code samples", len(SAMPLES))
 
-    try:
-        for i, sample in enumerate(SAMPLES, start=1):
-            session_id = f"code-review-{uuid.uuid4().hex[:8]}"
-            log.info("Sample #%d  session=%s", i, session_id)
-            set_session_id(session_id)
+    for i, sample in enumerate(SAMPLES, start=1):
+        session_id = f"code-review-{uuid.uuid4().hex[:8]}"
+        log.info("Sample #%d  session=%s", i, session_id)
+        try:
+            result = compiled_graph.invoke(
+                {"code": sample["code"], "language": sample["language"]},
+                config={"configurable": {"thread_id": session_id}},
+            )
+            log.info(
+                "Sample #%d  category=%s  summary=%s…",
+                i,
+                result.get("category"),
+                str(result.get("summary", ""))[:150],
+            )
+        except Exception:
+            log.exception("Sample #%d failed", i)
 
-            try:
-                with tracer.start_as_current_span(
-                    "code_review",
-                    attributes={"remi.session_id": session_id},
-                ):
-                    result = compiled_graph.invoke(
-                        {"code": sample["code"], "language": sample["language"]}
-                    )
-                    log.info(
-                        "Sample #%d  category=%s  summary=%s…",
-                        i,
-                        result.get("category"),
-                        str(result.get("summary", ""))[:150],
-                    )
-            except Exception:
-                log.exception("Sample #%d failed", i)
-
-        log.info("All samples reviewed")
-    finally:
-        log.info("Flushing spans to backend...")
-        tracer_provider.shutdown()
-        log.info("Span export completed")
+    log.info("All samples reviewed")
 
 
 if __name__ == "__main__":

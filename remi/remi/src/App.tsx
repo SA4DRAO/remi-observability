@@ -72,7 +72,6 @@ function Navigation({
 function App() {
   const [activePage, setActivePage] = useState<Page>("sessions");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   const handleSelectSession = useCallback((sessionId: string, _name: string | null) => {
@@ -112,9 +111,6 @@ function App() {
           {selectedSessionId ? (
             <SessionDetailPage
               sessionId={selectedSessionId}
-              sessionName={null}
-              orgId={selectedOrgId}
-              agentId={selectedAgentId}
               onBack={handleBack}
             />
           ) : activePage === "analytics" ? (
@@ -122,9 +118,7 @@ function App() {
           ) : (
             <SessionsPage
               onSelectSession={handleSelectSession}
-              selectedOrgId={selectedOrgId}
               selectedAgentId={selectedAgentId}
-              onChangeOrgId={setSelectedOrgId}
               onChangeAgentId={setSelectedAgentId}
             />
           )}

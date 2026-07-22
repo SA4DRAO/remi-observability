@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../utils/api-client";
-import type { SpanSearchResult } from "../types/v2";
+import type { SpanSearchResult } from "../types";
 
 export function useSpanSearch(query: string) {
   const trimmed = query.trim();
@@ -10,7 +10,7 @@ export function useSpanSearch(query: string) {
     queryKey: ["span-search", trimmed],
     queryFn: async () => {
       const envelope = await apiClient.get<{ success: boolean; data: SpanSearchResult[] }>(
-        "/api/v1/analytics/search",
+        "/api/v1/sessions/spans/search",
         { params: { q: trimmed, limit: 30 } }
       );
       return envelope.data;

@@ -67,6 +67,11 @@ class ApiClient {
           errorMessage: error.message,
           responseData: error.response?.data,
         });
+        // The backend returns {success:false, error:"<message>"} on failure. Surface that
+        // message so hooks/UI that read error.message show the real cause instead of the
+        // generic axios "Request failed with status code 500".
+        const serverError = (error.response?.data as { error?: string } | undefined)?.error;
+        if (serverError) error.message = serverError;
         return Promise.reject(error);
       }
     );

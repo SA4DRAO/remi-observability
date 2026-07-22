@@ -2,7 +2,7 @@
 
 Demonstrates:
 - Pure LangChain Expression Language (LCEL) pipeline: Prompt → LLM → OutputParser
-- Pure OTLP instrumentation via LangchainInstrumentor (no custom callback needed)
+- Pure OTLP instrumentation via zero-code auto-instrumentation (opentelemetry-instrument)
 - Two LLM calls per topic (outline + expand) visible as child spans in the trace view
 - Conversation grouping: both topics share one conversation_id in the Remi UI
 
@@ -15,27 +15,18 @@ import logging
 import os
 import uuid
 
-import httpx
 from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-
-from opentelemetry.instrumentation.langchain import LangchainInstrumentor
-
-from otel_setup import configure_otel, set_conversation_id, set_session_id
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
-ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "simple-chain-agent"
-AGENT_VERSION = os.getenv("REMI_AGENT_VERSION", "v1")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+BASE_URL = os.getenv("OPENAI_BASE_URL")  # None → api.openai.com
 
 OUTLINE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", "You are a technical content strategist. Return a 5-bullet outline only — no prose."),
@@ -53,66 +44,39 @@ TOPICS = [
 ]
 
 
-def check_backend_health() -> bool:
-    try:
-        r = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
-        ok = r.status_code == 200
-        log.info("Backend health: %s", "OK" if ok else "FAIL")
-        return ok
-    except Exception as exc:
-        log.error("Backend unreachable: %s", exc)
-        return False
 
 
 def main() -> None:
-    log.info("Simple LCEL chain (backend=%s, model=%s, org=%s)", BACKEND_URL, MODEL, ORG_ID)
-
-    if not check_backend_health():
-        log.warning("Backend unreachable — spans may not reach Remi")
-
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
+    if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set")
+    log.info("Simple LCEL chain (model=%s)", MODEL)
 
-    tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID, service_version=AGENT_VERSION)
-    LangchainInstrumentor().instrument()
     parser = StrOutputParser()
+    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, timeout=60, max_retries=2)
 
-    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=openai_api_key)
+    for item in TOPICS:
+        # One session per topic; BOTH chain invokes share the thread_id, so the
+        # outline and expand traces group into a single Remi session.
+        session_id = f"simple-chain-{uuid.uuid4().hex[:8]}"
+        session_config = {"configurable": {"thread_id": session_id}}
+        log.info("topic=%r  session=%s", item["topic"][:50], session_id)
 
-    try:
-        conversation_id = f"blog-series-{uuid.uuid4().hex[:8]}"
-        set_conversation_id(conversation_id)
-        log.info("conversation=%s  topics=%d", conversation_id, len(TOPICS))
+        try:
+            outline_chain = OUTLINE_PROMPT | llm | parser
+            outline = outline_chain.invoke(
+                {"topic": item["topic"], "tone": item["tone"]},
+                config=session_config,
+            )
+            log.info("Outline: %d chars", len(outline))
 
-        for item in TOPICS:
-            session_id = f"simple-chain-{uuid.uuid4().hex[:8]}"
-            log.info("topic=%r  session=%s", item["topic"][:50], session_id)
-            set_session_id(session_id)
+            expand_chain = EXPAND_PROMPT | llm | parser
+            post = expand_chain.invoke({"outline": outline}, config=session_config)
+            log.info("Post: %d chars — %s…", len(post), post[:80])
 
-            try:
-                with tracer.start_as_current_span(
-                    "RunnableSequence",
-                    attributes={"remi.session_id": session_id},
-                ):
-                    outline_chain = OUTLINE_PROMPT | llm | parser
-                    outline = outline_chain.invoke(
-                        {"topic": item["topic"], "tone": item["tone"]},
-                    )
-                    log.info("Outline: %d chars", len(outline))
+        except Exception:
+            log.exception("Chain failed for topic=%r", item["topic"])
 
-                    expand_chain = EXPAND_PROMPT | llm | parser
-                    post = expand_chain.invoke({"outline": outline})
-                    log.info("Post: %d chars — %s…", len(post), post[:80])
-
-            except Exception:
-                log.exception("Chain failed for topic=%r", item["topic"])
-
-        log.info("All topics processed")
-    finally:
-        log.info("Flushing spans…")
-        tracer_provider.shutdown()
-        log.info("Done")
+    log.info("All topics processed")
 
 
 if __name__ == "__main__":

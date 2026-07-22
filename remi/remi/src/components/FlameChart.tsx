@@ -1,23 +1,16 @@
-/**
- * FlameChart — Gantt-style horizontal bar chart showing spans in wall-clock time.
- * Clicking a bar selects that span (opens SpanDetailPanel).
- */
-
-import type { SpanV2 } from "../types/v2";
+import type { Span } from "../types";
 
 interface FlameChartProps {
-  spans: SpanV2[];
-  onSpanClick?: (span: SpanV2) => void;
+  spans: Span[];
+  onSpanClick?: (span: Span) => void;
   selectedSpanId?: string | null;
 }
 
-function spanColor(span: SpanV2): string {
-  const name = span.name.toLowerCase();
-  if (span.status_code === 2) return "bg-red-400 dark:bg-red-600";
-  if (span.model_name || name.includes("llm") || name.includes("chat") || name.includes("completion"))
-    return "bg-blue-400 dark:bg-blue-600";
-  if (name.includes("tool") || span.kind === 4)
-    return "bg-emerald-400 dark:bg-emerald-600";
+function spanColor(span: Span): string {
+  if (span.status === "error")  return "bg-red-400 dark:bg-red-600";
+  if (span.kind === "llm")      return "bg-blue-400 dark:bg-blue-600";
+  if (span.kind === "tool")     return "bg-emerald-400 dark:bg-emerald-600";
+  if (span.kind === "agent")    return "bg-violet-400 dark:bg-violet-600";
   return "bg-slate-400 dark:bg-slate-500";
 }
 
@@ -27,66 +20,62 @@ function formatMs(ms: number): string {
 
 export function FlameChart({ spans, onSpanClick, selectedSpanId }: FlameChartProps) {
   if (spans.length === 0) {
-    return (
-      <p className="py-8 text-center text-sm text-muted-foreground">No spans to display.</p>
-    );
+    return <p className="py-8 text-center text-sm text-muted-foreground">No spans to display.</p>;
   }
 
-  // Filter spans with valid timestamps
-  const validSpans = spans.filter((s) => s.start_time_ns > 0 && s.end_time_ns > 0);
+  const validSpans = spans.filter((s) => s.started_at && s.duration_ms >= 0);
   if (validSpans.length === 0) {
-    return (
-      <p className="py-8 text-center text-sm text-muted-foreground">
-        No timing data available for these spans.
-      </p>
-    );
+    return <p className="py-8 text-center text-sm text-muted-foreground">No timing data available.</p>;
   }
 
-  const minNs = Math.min(...validSpans.map((s) => s.start_time_ns));
-  const maxNs = Math.max(...validSpans.map((s) => s.end_time_ns));
-  const totalNs = maxNs - minNs;
-  if (totalNs === 0) return null;
+  const startTimes = validSpans.map((s) => new Date(s.started_at).getTime());
+  const endTimes   = validSpans.map((s) => new Date(s.started_at).getTime() + s.duration_ms);
+  const minMs      = Math.min(...startTimes);
+  const maxMs      = Math.max(...endTimes);
+  const totalMs    = maxMs - minMs;
+  if (totalMs === 0) return null;
 
-  // Sort chronologically
-  const sorted = [...validSpans].sort((a, b) => a.start_time_ns - b.start_time_ns);
+  const sorted = [...validSpans].sort((a, b) =>
+    new Date(a.started_at).getTime() - new Date(b.started_at).getTime()
+  );
 
-  // Build depth (lane) assignment for visual stacking
-  const laneEnds: number[] = [];
+  // Lane assignment: pack spans into horizontal rows without overlap.
+  // Only the first span of each lane gets a gutter label — later spans in the
+  // same lane would overprint it; their names live in the bar tooltip instead.
+  const laneEndMs: number[] = [];
   const laneMap = new Map<string, number>();
+  const laneLabelSpan = new Set<string>();
   for (const span of sorted) {
-    let lane = laneEnds.findIndex((endNs) => endNs <= span.start_time_ns);
+    const spanStart = new Date(span.started_at).getTime();
+    let lane = laneEndMs.findIndex((endMs) => endMs <= spanStart);
     if (lane === -1) {
-      lane = laneEnds.length;
-      laneEnds.push(0);
+      lane = laneEndMs.length;
+      laneEndMs.push(0);
+      laneLabelSpan.add(span.span_id);
     }
-    laneEnds[lane] = span.end_time_ns;
+    laneEndMs[lane] = spanStart + span.duration_ms;
     laneMap.set(span.span_id, lane);
   }
-  const totalLanes = laneEnds.length;
+  const totalLanes = laneEndMs.length;
 
-  const BAR_HEIGHT = 22;
-  const BAR_GAP = 2;
+  const BAR_HEIGHT  = 22;
+  const BAR_GAP     = 2;
   const LABEL_WIDTH = 160;
-  const svgHeight = totalLanes * (BAR_HEIGHT + BAR_GAP) + 24;
+  const svgHeight   = totalLanes * (BAR_HEIGHT + BAR_GAP) + 24;
 
   return (
     <div className="overflow-x-auto">
-      <div
-        className="relative"
-        style={{ minWidth: 600 }}
-      >
+      <div className="relative" style={{ minWidth: 600 }}>
         {/* Time axis */}
         <div className="flex text-[10px] text-muted-foreground mb-1 pl-[160px]">
           {[0, 25, 50, 75, 100].map((pct) => (
             <span key={pct} className="flex-1 text-center">
-              {formatMs((totalNs * pct) / 100 / 1e6)}
+              {formatMs((totalMs * pct) / 100)}
             </span>
           ))}
         </div>
 
-        {/* Bars */}
         <div className="relative" style={{ height: svgHeight }}>
-          {/* Grid lines */}
           {[25, 50, 75].map((pct) => (
             <div
               key={pct}
@@ -96,10 +85,11 @@ export function FlameChart({ spans, onSpanClick, selectedSpanId }: FlameChartPro
           ))}
 
           {sorted.map((span) => {
-            const lane = laneMap.get(span.span_id) ?? 0;
-            const leftPct = ((span.start_time_ns - minNs) / totalNs) * 100;
-            const widthPct = Math.max(((span.end_time_ns - span.start_time_ns) / totalNs) * 100, 0.2);
-            const top = lane * (BAR_HEIGHT + BAR_GAP);
+            const lane       = laneMap.get(span.span_id) ?? 0;
+            const spanStartMs = new Date(span.started_at).getTime();
+            const leftPct    = ((spanStartMs - minMs) / totalMs) * 100;
+            const widthPct   = Math.max((span.duration_ms / totalMs) * 100, 0.2);
+            const top        = lane * (BAR_HEIGHT + BAR_GAP);
             const isSelected = selectedSpanId === span.span_id;
 
             return (
@@ -108,57 +98,31 @@ export function FlameChart({ spans, onSpanClick, selectedSpanId }: FlameChartPro
                 className="absolute flex items-center"
                 style={{ top, height: BAR_HEIGHT, left: 0, right: 0 }}
               >
-                {/* Label column */}
-                <div
-                  className="shrink-0 pr-2 text-right"
-                  style={{ width: LABEL_WIDTH }}
-                >
-                  <span
-                    className="block truncate text-[10px] text-muted-foreground"
-                    title={span.name}
-                  >
-                    {span.name}
-                  </span>
+                <div className="shrink-0 pr-2 text-right" style={{ width: LABEL_WIDTH }}>
+                  {laneLabelSpan.has(span.span_id) && (
+                    <span className="block truncate text-[10px] text-muted-foreground" title={span.name}>
+                      {span.name}
+                    </span>
+                  )}
                 </div>
 
-                {/* Bar area */}
                 <div className="relative flex-1 self-stretch">
                   <button
                     className={`absolute h-full rounded transition-opacity ${spanColor(span)} ${
                       isSelected ? "ring-2 ring-primary ring-offset-1 opacity-100" : "opacity-80 hover:opacity-100"
                     }`}
-                    style={{
-                      left: `${leftPct}%`,
-                      width: `${widthPct}%`,
-                      minWidth: 3,
-                    }}
+                    style={{ left: `${leftPct}%`, width: `${widthPct}%`, minWidth: 3 }}
                     onClick={() => onSpanClick?.(span)}
-                    title={`${span.name} — ${formatMs(span.duration_ns / 1e6)}`}
+                    title={`${span.name} — ${formatMs(span.duration_ms)}`}
                   >
                     <span className="absolute inset-0 flex items-center px-1 text-[9px] font-medium text-white truncate pointer-events-none">
-                      {widthPct > 5 ? formatMs(span.duration_ns / 1e6) : ""}
+                      {widthPct > 5 ? formatMs(span.duration_ms) : ""}
                     </span>
                   </button>
                 </div>
               </div>
             );
           })}
-        </div>
-
-        {/* Legend */}
-        <div className="mt-3 flex flex-wrap gap-3 text-[10px] text-muted-foreground pl-[160px]">
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-5 rounded bg-blue-400" /> LLM
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-5 rounded bg-emerald-400" /> Tool
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-5 rounded bg-slate-400" /> Other
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2.5 w-5 rounded bg-red-400" /> Error
-          </span>
         </div>
       </div>
     </div>

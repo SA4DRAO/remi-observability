@@ -9,51 +9,79 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Required env vars (copy from root .env.example)
-export REMI_API_KEY=your_key
-export REMI_BACKEND_URL=http://localhost:3100     # or http://otel-collector:4318 inside Docker
-export OPENAI_API_KEY=your_openai_key             # or OPENAI_BASE_URL for non-OpenAI providers
-# Each script has its own default org/agent_id — no override needed
+export OPENAI_API_KEY=sk-...        # ChatOpenAI reads this itself
+# OpenRouter (or any OpenAI-compatible gateway) instead:
+#   OPENAI_API_KEY=<openrouter key>
+#   OPENAI_BASE_URL=https://openrouter.ai/api/v1
+#   OPENAI_MODEL=openai/gpt-4o-mini
 ```
 
-The full infra stack must be running (`docker-compose up -d` from the repo root) before running examples.
+The full infra stack must be running (`docker compose up -d` from the repo root).
 
-## Running Examples
+## The design rule: agents are fully isolated files
+
+**There is zero observability code in any agent.** No Remi imports, no OTel
+imports, no tracer, no flush, no session helper — `otel_setup.py` is gone.
+Everything observability lives in exactly two standard places:
+
+1. **The launcher** — `opentelemetry-instrument` (from `opentelemetry-distro`)
+   builds the TracerProvider/exporter from `OTEL_*` env vars and auto-discovers
+   `LangchainInstrumentor` + `SystemMetricsInstrumentor` via entry points.
+   Spans flush via the SDK's atexit hook; no explicit flush call is needed.
+2. **LangChain's own config** — session identity is the `thread_id` production
+   LangGraph apps already pass for checkpointing:
+   ```python
+   agent.invoke(inputs, config={"configurable": {"thread_id": session_id}})
+   ```
+   The instrumentation maps it to `gen_ai.conversation.id` on the root span and
+   `traceloop.association.properties.thread_id` on every child span; Remi's
+   ClickHouse `SessionId` column resolves both (plus `metadata.session_id` for
+   plain-LCEL users) to one session. Reuse a thread_id across invokes for
+   multi-turn sessions — verified: a LangGraph invoke + a separate LCEL invoke
+   sharing one thread_id land in ONE Remi session.
+
+Session **completion** is also zero-code: spans only export after they end, so
+the backend marks a session complete as soon as its root span (empty
+ParentSpanId) arrives — no end marker, no 2-minute idle wait. (The idle cutoff
+remains as fallback; an explicit `remi.session.end` span name is honored for
+root-less streaming sources.)
+
+## Running
 
 ```bash
-python simple_chain_agent.py       # simplest: two-step LCEL pipeline
-python research_agent.py           # ReAct agent with tools
-python customer_support_agent.py   # multi-turn conversation
-python code_review_agent.py        # tool-heavy StateGraph agent
-python multi_agent_supervisor.py   # two-agent pipeline (analyst + writer)
+export OTEL_TRACES_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=none
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:3100
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer acme-ingest-key"
+export OTEL_RESOURCE_ATTRIBUTES="service.namespace=acme,service.version=1.0.0"
+export OTEL_EXPERIMENTAL_RESOURCE_DETECTORS=os,process,host
+export OTEL_METRIC_EXPORT_INTERVAL=5000
+
+OTEL_SERVICE_NAME=support-agent       opentelemetry-instrument python customer_support_agent.py
+OTEL_SERVICE_NAME=research-agent      opentelemetry-instrument python research_agent.py
+OTEL_SERVICE_NAME=simple-chain-agent  opentelemetry-instrument python simple_chain_agent.py
+OTEL_SERVICE_NAME=code-review-agent   opentelemetry-instrument python code_review_agent.py
+OTEL_SERVICE_NAME=supervisor-agent    opentelemetry-instrument python multi_agent_supervisor.py
+OTEL_SERVICE_NAME=metrics-probe-agent opentelemetry-instrument python metrics_probe_agent.py
 ```
 
-## How Examples Instrument Remi
+`tool_failure.py` is a helper module (injects intermittent tool failures), not a
+runnable agent. `demo_feeder.sh` + `Dockerfile` wrap all of this for the compose
+`demo-feeder` service, including the OpenRouter→OPENAI_* env translation.
 
-All examples use **pure OTLP emission** via `otel_setup.py` + `LangchainInstrumentor`:
+## Gotchas
 
-1. `configure_otel(AGENT_ID, org_id=ORG_ID)` — creates an OTLP `TracerProvider` pointed at `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`). Sets `service.name` = agent ID and `service.namespace` = org ID as resource attributes. Attaches `_MetadataSpanProcessor` which stamps `remi.session_id` and `gen_ai.conversation.id` on every span from ContextVars.
-2. `LangchainInstrumentor().instrument()` — auto-instruments all LangChain/LangGraph calls (LLM calls, tool calls, chains) as child OTel spans with `gen_ai.*` attributes and token usage. No custom callback needed.
-3. `set_session_id(session_id)` — sets the session ContextVar before each invocation so the span processor can stamp it on all spans in that invocation.
-
-Each example follows this pattern:
-```python
-tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
-LangchainInstrumentor().instrument()
-# ...
-set_session_id(session_id)          # before each invocation
-with tracer.start_as_current_span("AgentExecutor", attributes={"remi.session_id": session_id}):
-    agent.invoke(inputs)            # no callbacks needed
-```
-
-Sessions are auto-created by the V2 OTLP ingest path — no explicit `POST /api/v1/sessions` needed.
-
-The OTel collector receives spans and forwards them to the backend at `POST /api/v1/traces/v1/traces`.
-
-## Architecture Notes
-
-- `otel_setup.py` is **not a package** — examples import it directly. Run from the `examples/` directory.
-- `_CONFIGURED` global prevents double-initialization of the TracerProvider.
-- `tracer_provider.shutdown()` at the end of each script flushes the `BatchSpanProcessor` and ensures all spans export before exit.
-- `simple_chain_agent.py` uses `set_conversation_id()` to group multiple sessions under one conversation in the Remi UI.
-- Model names default to `gpt-4o-mini` via `OPENAI_MODEL`. Swap `OPENAI_BASE_URL` and `OPENAI_MODEL` env vars to use a different provider or model.
+- **`opentelemetry-distro` is not optional.** Without it the launcher silently
+  no-ops: instrumentors load, no exporter is built, zero spans leave, no error.
+  If agents run but nothing appears: `pip show opentelemetry-distro`.
+- **requirements.txt is pinned exactly, on purpose.** Auto-instrumentation is
+  sensitive to the langchain/langgraph/instrumentor version combination — an
+  open floor once resolved a combo that produced zero LangChain spans silently.
+  Bump deliberately and re-verify against ClickHouse span/llm_call counts, not
+  "the script didn't crash".
+- **`OTEL_SERVICE_NAME` is the agent id** in the dashboard; without it sessions
+  land under `unknown_service`.
+- A one-time `create_agent` root span fires before any thread_id exists and
+  shows up as its own tiny hex-named session — known artifact, harmless.
+- Agents never health-check the telemetry endpoint: observability must not gate
+  business logic. LLM clients set `timeout=60, max_retries=2`.

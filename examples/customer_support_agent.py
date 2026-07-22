@@ -1,14 +1,13 @@
-"""Customer support agent demo.
+"""Customer support agent — a fully isolated production-style LangChain agent.
 
-Demonstrates:
-- A production-style LangChain agent with parallel tool calls
-- Remi observability via package-based OTLP traces (no custom callback events)
-- Multiple independent support tickets run back-to-back
+There is ZERO observability code in this file. Tracing comes entirely from the
+zero-code launcher (`opentelemetry-instrument`, configured by OTEL_* env vars),
+and session identity comes from LangGraph's own `thread_id` — the same key
+production apps already pass for checkpointing — which the instrumentation maps
+to the standard `gen_ai.conversation.id` attribute Remi groups sessions by.
 
 Usage:
-    python examples/customer_support_agent.py
-
-Integration for the deployer is automatic once OTEL is configured.
+    OTEL_SERVICE_NAME=support-agent opentelemetry-instrument python customer_support_agent.py
 """
 from __future__ import annotations
 
@@ -20,15 +19,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from opentelemetry.instrumentation.langchain import LangchainInstrumentor
-
-from otel_setup import configure_otel, set_session_id
 from tool_failure import configure_example_tools, maybe_fail_tool_call
 
 load_dotenv()
@@ -40,14 +35,12 @@ logging.basicConfig(
 )
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — plain provider env vars; ChatOpenAI reads OPENAI_API_KEY itself.
+# Route via OpenRouter (or any OpenAI-compatible gateway) by setting
+# OPENAI_BASE_URL + OPENAI_MODEL; org identity lives in the OTLP ingest key.
 # ---------------------------------------------------------------------------
-BACKEND_URL = os.getenv("REMI_BACKEND_URL", "http://localhost:3100")
-API_KEY = os.getenv("REMI_API_KEY", "test-key-123")
-ORG_ID = os.getenv("REMI_ORG_ID") or "demo-org"
-AGENT_ID = os.getenv("REMI_AGENT_ID") or "support-agent"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+BASE_URL = os.getenv("OPENAI_BASE_URL")  # None → api.openai.com
 
 SYSTEM_PROMPT = """\
 You are a senior customer support agent with access to a database of customer
@@ -232,85 +225,39 @@ TICKETS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Backend helpers
-# ---------------------------------------------------------------------------
-
-
-def check_backend_health() -> bool:
-    try:
-        r = httpx.get(f"{BACKEND_URL}/health", timeout=5.0)
-        ok = r.status_code == 200
-        status = r.json().get("status", "?") if ok else r.status_code
-        log.info("Backend health: %s (%s)", "OK" if ok else "FAIL", status)
-        return ok
-    except Exception as exc:
-        log.error("Backend health check failed: %s", exc)
-        return False
-
-
-def make_session_id() -> str:
-    return f"support-{uuid.uuid4().hex[:8]}"
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    log.info("Starting Remi Customer Support Agent (backend=%s, model=%s, org=%s, agent=%s)", BACKEND_URL, MODEL, ORG_ID, AGENT_ID)
-
-    if not check_backend_health():
-        log.warning("Backend unreachable — events may be lost")
-
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
+    if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is not set")
+    log.info("Starting customer support agent (model=%s)", MODEL)
 
-    # Build the LangChain agent once — tools and model are fixed for the run
-    llm = ChatOpenAI(
-        model=MODEL,
-        base_url=BASE_URL,
-        api_key=openai_api_key,
-    )
-    tracer_provider, tracer = configure_otel(AGENT_ID, org_id=ORG_ID)
-    LangchainInstrumentor().instrument()
+    # Build the LangChain agent once — tools and model are fixed for the run.
+    llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, timeout=60, max_retries=2)
     agent = create_react_agent(llm, TOOLS, prompt=SYSTEM_PROMPT)
 
     log.info("Processing %d tickets", len(TICKETS))
 
-    try:
-        for ticket in TICKETS:
-            session_id = make_session_id()
-            log.info("Ticket=%r  session=%s", ticket.name, session_id)
-            set_session_id(session_id)
+    for ticket in TICKETS:
+        # thread_id is the ONLY session plumbing: LangGraph's own conversation
+        # key, mapped by the instrumentation to gen_ai.conversation.id, which
+        # Remi groups sessions by. Reuse an id across invokes for multi-turn.
+        session_id = f"support-{uuid.uuid4().hex[:8]}"
+        log.info("Ticket=%r  session=%s", ticket.name, session_id)
+        try:
+            result = agent.invoke(
+                {"messages": [("user", ticket.description)]},
+                config={"configurable": {"thread_id": session_id}},
+            )
+            final_messages = result.get("messages", [])
+            final_text = final_messages[-1].content if final_messages else "(no output)"
+            log.info("Ticket=%s  done  response=%s", ticket.name, str(final_text)[:200])
+        except Exception:
+            log.exception("Ticket=%s failed", ticket.name)
 
-            try:
-                with tracer.start_as_current_span(
-                    "AgentExecutor",
-                    attributes={
-                        "remi.session_id": session_id,
-                        "ticket.name": ticket.name,
-                        "ticket.customer_id": ticket.customer_id,
-                    },
-                ):
-                    result = agent.invoke(
-                        {"messages": [("user", ticket.description)]},
-                    )
-
-                    final_messages = result.get("messages", [])
-                    final_text = final_messages[-1].content if final_messages else "(no output)"
-                    log.info("Ticket=%s  done  response=%s", ticket.name, str(final_text)[:200])
-
-            except Exception:
-                log.exception("Ticket=%s failed", ticket.name)
-
-        log.info("All tickets processed")
-    
-    finally:
-        log.info("Flushing spans to backend...")
-        tracer_provider.shutdown()
-        log.info("Span export completed")
+    log.info("All tickets processed")
 
 
 if __name__ == "__main__":

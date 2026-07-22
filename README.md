@@ -1,255 +1,114 @@
-# Remi Observability
+# Remi
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](remi-backend/)
-[![React](https://img.shields.io/badge/React-19-61DAFB)](remi/remi/)
-[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-native-f5a800)](https://opentelemetry.io/)
+**Audit-grade observability for LLM agents.** Remi ingests OpenTelemetry traces
+from LangChain, LangGraph, Claude Code, or any OTLP source, and turns them into
+flame-chart timelines, prompt-level audit trails, system metrics, and
+LLM-as-judge verdicts — org-scoped, self-hosted, on ClickHouse.
 
-Remi is an open-source observability platform for LLM agents. It collects, processes, and visualizes traces from LangChain, LangGraph, and any OpenTelemetry-instrumented application — giving you a real-time view of every LLM call, token cost, and error across your entire agent pipeline.
+## First trace in five minutes
 
-Remi is built with:
+```bash
+# 1. Start the stack (ClickHouse, Postgres, collector, backend, dashboard)
+git clone <this repo> && cd Remi
+docker compose up -d --build
 
-[![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?logo=typescript&logoColor=white)](remi-backend/)
-[![React](https://img.shields.io/badge/-React-61DAFB?logo=react&logoColor=black)](remi/remi/)
-[![PostgreSQL](https://img.shields.io/badge/-PostgreSQL-4169E1?logo=postgresql&logoColor=white)](scripts/init-db.sql)
----
+# 2. Point ANY OpenTelemetry SDK at Remi — zero code, env vars only
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:3100"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer acme-ingest-key"
+export OTEL_EXPERIMENTAL_RESOURCE_DETECTORS="os,process,host"
 
-## Index
+# 3. Launch via the zero-code auto-instrumentation wrapper — no LangchainInstrumentor()
+#    call, no custom TracerProvider. Every LLM call, tool, and graph step gets
+#    traced with prompts, responses, and token usage automatically:
+#    pip install opentelemetry-distro opentelemetry-instrumentation-langchain
+#    opentelemetry-instrument python your_agent.py
 
-- [Features](#features)
-- [Architecture](#architecture)
-- [Services & Ports](#services--ports)
-- [Quick Start](#quick-start)
-- [Running Example Agents](#running-example-agents)
-- [Development Environment](#development-environment)
-- [Tech Stack](#tech-stack)
+# Open http://localhost:3000 — your sessions are there.
+```
 
----
+Or run a ready-made agent: `cd examples && source venv/bin/activate && OTEL_SERVICE_NAME=support-agent opentelemetry-instrument python customer_support_agent.py`
+(needs `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in the root `.env`; full env var list in `examples/README.md`).
 
-## Features
+## What you get
 
-- **Full trace timeline** — Every LLM call, tool invocation, and chain step visualized as a flame chart with precise timings
-- **Token usage & cost tracking** — Input/output tokens and USD cost per span, per session, and aggregated across your entire fleet
-- **Cross-session analytics** — Error rates, model breakdown, version comparison — all queryable by org, agent, and date range
-- **LLM-as-a-judge span analysis** — Select any span in the trace and ask an LLM to evaluate it (latency, quality, cost efficiency)
-- **OpenTelemetry native** — Works with any OTel-compatible source out of the box; no proprietary SDK required
-- **LangChain / LangGraph support** — Two lines of setup (`configure_otel` + `LangchainInstrumentor().instrument()`) gives full trace coverage with no custom callbacks
-- **OpenRouter webhook support** — Forward production traces directly from OpenRouter into Remi
-- **Version comparison** — Tag your agents with `service.version` and compare token usage, cost, and error rate across releases
-- **Model pricing sync** — Pulls current pricing from LiteLLM's community-maintained dataset; cost calculations stay accurate
-
----
+- **Flame-chart timelines** — every LLM call, tool execution, and chain step with exact timings
+- **Prompt-level audit** — prompts/responses captured on spans, gated behind the `read:prompts` scope, every read logged to a **tamper-evident hash-chained audit log** (`GET /api/v1/admin/audit-log/verify` proves it wasn't altered)
+- **LLM-as-a-judge** — one click scores any span for correctness, instruction adherence, tool-use quality, and hallucination risk; verdicts persist for regression comparison
+- **Version comparison** — stamp `service.version` (or `REMI_AGENT_VERSION`) and compare latency, error rate, and judge scores across releases
+- **System metrics** — CPU/memory of the agent process charted per session; host/OS/runtime from standard SDK resource detectors
+- **Org isolation** — per-org API keys at ingest; the collector stamps `remi.org_id` from the validated key; every query is org-scoped server-side
+- **PII redaction** — at the collector, before data touches storage
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  LangChain / LangGraph / any OTLP source        │
-│  examples/otel_setup.py                         │
-└──────────────────────┬──────────────────────────┘
-                       │ OTLP HTTP spans
-                       ▼
-              ┌────────────────┐
-              │ OTel Collector │ :4318
-              └───────┬────────┘
-                      │ POST /api/v1/traces
-                      ▼
-              ┌────────────────┐
-              │  remi-backend  │ :3100  Express 5 / TypeScript / Bun
-              │  · Zod schema  │
-              │  · Redis cache │
-              └───────┬────────┘
-                      │ asyncpg
-                      ▼
-               ┌──────────┐
-               │ Postgres │ :5432
-               └──────────┘
-                     ▲
-                     │ REST API
-              ┌──────────────┐
-              │  remi (UI)   │ :3000  React 19 / Vite / TanStack Query
-              └──────────────┘
+Agent (any OTel SDK) ──OTLP/protobuf + Bearer key──▶ Spring backend :3100
+                                                        │ validates key, stamps X-Remi-Org
+                                                        ▼
+                                              OTel Collector :4318 (loopback only)
+                                                        │ org stamp, PII redaction
+                                                        ▼
+                                          ClickHouse (spans, metrics) + Jaeger
+                                                        ▲
+                          Dashboard :3000 ──▶ Spring :3100 /api/v1/* (org from key)
+
+                          Postgres = identity only (orgs, hashed keys, audit chain)
 ```
 
----
+| Directory | What it is |
+|-----------|------------|
+| `remi-backend-spring/` | Spring Boot backend: org-scoped read API, authenticated OTLP ingest proxy, admin, judge |
+| `remi/remi/` | React 19 dashboard |
+| `examples/` | Production-style LangChain/LangGraph agents + the demo feeder |
+| `remi-marketing/` | Marketing site |
+| `remi-backend/` | Legacy Express backend — superseded, do not extend |
 
-## Services & Ports
+## Services & ports
 
-| Service         | Host port | Purpose                          |
-|-----------------|-----------|----------------------------------|
-| Dashboard UI    | 3000      | Observability frontend           |
-| Backend API     | 3100      | REST API + OTLP ingest           |
-| Postgres        | 5432      | Session and trace storage        |
-| Jaeger UI       | 16686     | Distributed trace viewer         |
-| OTel Collector  | 4318      | OTLP HTTP receiver               |
+| Service | Port | Notes |
+|---------|------|-------|
+| Dashboard | 3000 | `?key=<api-key>` overrides the baked-in key |
+| Backend API + ingest | 3100 | `POST /v1/{traces,metrics,logs}` with org key |
+| Marketing site | 3200 | |
+| OTel Collector | 4318 | **loopback only** — external ingest goes through :3100 |
+| ClickHouse | 8123 | |
+| Jaeger UI | 16686 | |
 
----
+## Seeded dev identities
 
-## Quick Start
+| Org | Key | Scopes |
+|-----|-----|--------|
+| `acme` | `acme-ingest-key` | write:sessions (agents) |
+| `acme` | `acme-admin-key` | all (dashboard default) |
+| `demo-org` | `demo-view-key` | read-only (public live demo) |
+| `demo-org` | `demo-ingest-key` | write:sessions (demo feeder) |
+| `demo-org` | `test-key-123` | all (dev) |
 
-**Prerequisites:** Docker or Podman with Compose support (no other dependencies needed)
+Rotate all of these outside local dev. Postgres init scripts only run on a fresh
+volume — apply seed changes to an existing DB via
+`docker exec -i postgres-primary psql -U remi_user -d remi_db`.
+
+## Benchmarks
+
+`scripts/benchmark.sh` loads synthetic spans into an isolated `bench` org and
+times the real dashboard queries against them. Results on a single dev box are
+in the script header. Bench data lives in its own date partitions and is
+dropped with one `ALTER TABLE ... DROP PARTITION` per day.
+
+## Development
 
 ```bash
-# 1. Clone
-git clone https://github.com/SA4DRAO/remi-observability.git
-cd remi-observability
+# Backend (builds inside the container image)
+docker compose build backend
 
-# 2. Configure environment
-cp .env.example .env
-# Open .env and set your OpenAI API key — that's the only required change:
-#   OPENAI_API_KEY=sk-...
+# Frontend
+cd remi/remi && bun install && bun run dev   # type-check: bun run type-check
 
-# 3. Start all services
-#    First run builds images and initialises the database (~30 seconds)
-docker-compose up -d
-# or: podman-compose up -d
-
-# 4. Wait for services to be healthy
-docker-compose ps
-
-# 5. Verify the backend is up
-curl http://localhost:3100/health
-
-# 6. Open the dashboard
-#    http://localhost:3000
+# Examples
+cd examples && source venv/bin/activate && pip install -r requirements.txt
 ```
 
-> **Podman users:** `podman-compose` works as a drop-in replacement everywhere `docker-compose` is used below.
-
-> **Fresh database:** The Postgres container runs `scripts/init-db.sql` automatically on first start — no manual migration step needed.
-
----
-
-## Environment Variables
-
-### Root `.env` (stack config)
-
-Copy `.env.example` to `.env`. The only required variable is:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | **Yes** | — | Powers the LLM-as-a-judge span analysis feature and the example agents |
-| `REMI_API_KEY` | No | `test-key-123` | Bearer token used by all services to authenticate requests |
-| `OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | Swap for any OpenAI-compatible endpoint (Anthropic, local Ollama, etc.) |
-| `OPENAI_MODEL` | No | `gpt-4o-mini` | Model used for span analysis and example agents |
-
-> The dashboard frontend reads `REMI_API_KEY` as `VITE_API_KEY` — both are set automatically from the root `.env` via docker-compose.
-
-### `examples/.env` (example agents)
-
-The example agents read from their own `.env` inside `examples/`. Copy from root and add the Remi connection vars:
-
-```bash
-cp .env examples/.env   # copies OPENAI_API_KEY
-# examples/.env already has the right defaults — no edits needed for a local stack:
-#   REMI_API_KEY=test-key-123
-#   REMI_BACKEND_URL=http://localhost:3100
-#   OPENAI_BASE_URL=https://api.openai.com/v1
-#   OPENAI_MODEL=gpt-4o-mini
-```
-
-Or create `examples/.env` manually:
-
-```bash
-OPENAI_API_KEY=sk-...          # your key
-REMI_API_KEY=test-key-123      # must match REMI_API_KEY in root .env
-REMI_BACKEND_URL=http://localhost:3100
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-```
-
----
-
-## Running Example Agents
-
-The `examples/` directory contains runnable LangChain agents that send traces through the full Remi pipeline. After each run, refresh the dashboard to see the new session.
-
-```bash
-cd examples
-
-# First-time setup
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-# Configure (see Environment Variables section above)
-cp ../.env .env              # copies OPENAI_API_KEY from root
-# Add the Remi connection vars if not already present:
-echo 'REMI_API_KEY=test-key-123' >> .env
-echo 'REMI_BACKEND_URL=http://localhost:3100' >> .env
-
-# Run the examples (stack must be running)
-python simple_chain_agent.py       # Two-step LCEL pipeline — good starting point
-python research_agent.py           # ReAct agent with parallel tool calls
-python customer_support_agent.py   # Customer support agent with ticket workflows
-python code_review_agent.py        # Tool-heavy StateGraph code analysis agent
-python multi_agent_supervisor.py   # Two-agent pipeline: analyst → writer
-```
-
-Sessions appear in the dashboard within a few seconds of each script exiting. Each agent has a distinct name (`simple-chain-agent`, `research-agent`, etc.) visible in the dashboard's agent filter.
-
----
-
-## Development Environment
-
-Each sub-package can be developed independently. All packages communicate over `localhost` when running outside Docker.
-
-### Backend (`remi-backend/`)
-
-```bash
-cd remi-backend
-bun install
-
-bun run dev           # Watch mode
-bun run type-check    # tsc --noEmit (strict mode)
-bun run lint
-bun test              # Runs test/*.test.js (builds first)
-bun test test/validation.test.js   # Single file
-```
-
-### Frontend (`remi/remi/`)
-
-```bash
-cd remi/remi
-bun install
-
-bun run dev           # Vite dev server at http://localhost:5173 with HMR
-bun run type-check
-bun run lint
-bun run build
-```
-
-### Useful Commands
-
-```bash
-# Tail logs for a specific service
-docker-compose logs -f backend
-
-# Rebuild a single service after a code change
-docker-compose up -d --build backend
-
-# Full reset (removes all data volumes)
-docker-compose down -v
-
-# Sync model pricing into the database
-python scripts/sync-model-pricing.py
-```
-
----
-
-## Tech Stack
-
-Remi would not be possible without these projects:
-
-| Component | Project |
-|-----------|---------|
-| OTLP tracing | [OpenTelemetry](https://opentelemetry.io/) |
-| LangChain integration | [LangChain](https://github.com/langchain-ai/langchain) |
-| Database client | [node-postgres](https://github.com/brianc/node-postgres) |
-| UI components | [shadcn/ui](https://ui.shadcn.com/) + [Radix UI](https://www.radix-ui.com/) |
-| Data fetching | [TanStack Query](https://tanstack.com/query) |
-| Schema validation | [Zod](https://zod.dev/) |
-| Model pricing data | [LiteLLM](https://github.com/BerriAI/litellm) |
-| Tracing UI | [Jaeger](https://www.jaegertracing.io/) |
-| Runtime (backend) | [Bun](https://bun.sh/) |
-
-Be sure to follow and support those projects too.
+`VITE_*` vars are baked into the frontend bundle at build time (compose build
+args). The judge needs `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) in the root
+`.env`; the same key powers the example agents and the demo feeder.

@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { apiClient } from "../utils/api-client";
-import type { SpanAnalysisResponse } from "../types/v2";
+import type { SpanAnalysisResponse } from "../types";
 
 export function useSpanAnalysis(sessionId: string) {
   const { mutate, data, isPending, error, reset } = useMutation<SpanAnalysisResponse, Error, string>({

@@ -1,34 +1,29 @@
-/**
- * useAnalytics — fetches cross-session analytics from GET /api/v1/sessions/analytics (V2).
- */
-
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../utils/api-client";
 import { logger } from "../utils/logger";
-import type { AnalyticsV2, AnalyticsQueryParams } from "../types/v2";
-
-// Legacy type aliases kept so old imports don't break at compile time.
-export type { AnalyticsV2 as AnalyticsData };
+import type { Analytics, AnalyticsQueryParams, VersionStats } from "../types";
 
 interface UseAnalyticsOptions extends AnalyticsQueryParams {
   pollingInterval?: number;
 }
 
 export function useAnalytics(options: UseAnalyticsOptions = {}) {
-  const { pollingInterval = 60_000, org_id, agent_id, start_date, end_date } = options;
+  const { pollingInterval = 60_000, org_id, agent_id, date_from, date_to, days = 30 } = options;
 
-  const { data, isPending, isFetching, error, refetch } = useQuery<AnalyticsV2>({
-    queryKey: ["analytics-v2", org_id ?? "all", agent_id ?? "all", start_date ?? "", end_date ?? ""],
+  const { data, isPending, isFetching, error, refetch } = useQuery<Analytics>({
+    queryKey: ["analytics", org_id ?? "", agent_id ?? "", date_from ?? "", date_to ?? "", days],
     queryFn: async () => {
       try {
-        const params: Record<string, string> = {};
-        if (org_id) params.org_id = org_id;
-        if (agent_id) params.agent_id = agent_id;
-        if (start_date) params.start_date = start_date;
-        if (end_date) params.end_date = end_date;
+        const params: Record<string, string | number> = { days };
+        if (org_id)    params.org_id    = org_id;
+        if (agent_id)  params.agent_id  = agent_id;
+        if (date_from) params.date_from = date_from;
+        if (date_to)   params.date_to   = date_to;
 
-        const envelope = await apiClient.get<{ success: boolean; data: AnalyticsV2 }>("/api/v1/sessions/analytics", { params });
-        logger.debug("Fetched V2 analytics");
+        const envelope = await apiClient.get<{ success: boolean; data: Analytics }>(
+          "/api/v1/analytics", { params }
+        );
+        logger.debug("Fetched analytics");
         return envelope.data;
       } catch (e) {
         logger.error("Failed to fetch analytics", e);
@@ -48,4 +43,44 @@ export function useAnalytics(options: UseAnalyticsOptions = {}) {
     error: error instanceof Error ? error : null,
     refetch,
   };
+}
+
+/** Per-service.version regression comparison: latency, errors, judge scores. */
+export function useVersionComparison(agentId?: string) {
+  const { data, isPending, error } = useQuery<VersionStats[]>({
+    queryKey: ["version-comparison", agentId ?? ""],
+    queryFn: async () => {
+      const params: Record<string, string> = {};
+      if (agentId) params.agent_id = agentId;
+      const envelope = await apiClient.get<{ success: boolean; data: VersionStats[] }>(
+        "/api/v1/analytics/versions", { params }
+      );
+      return envelope.data;
+    },
+    refetchInterval: 60_000,
+    staleTime: 55_000,
+  });
+
+  return {
+    versions: data ?? [],
+    isPending,
+    error: error instanceof Error ? error : null,
+  };
+}
+
+/** Judge a random sample of one agent-version's LLM spans so its quality columns fill in. */
+export function useSampleJudge() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ agent, version }: { agent: string; version: string }) => {
+      const envelope = await apiClient.post<{
+        success: boolean;
+        data: { agent: string; version: string; candidates: number; judged: number };
+      }>("/api/v1/analytics/versions/sample-judge", { agent, version, sample: 3 });
+      return envelope.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["version-comparison"] });
+    },
+  });
 }

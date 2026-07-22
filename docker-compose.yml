@@ -21,46 +21,63 @@ services:
       retries: 10
       start_period: 10s
 
-  # API Backend
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:24.6-alpine
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_DB: remi
+      CLICKHOUSE_USER: remi_user
+      CLICKHOUSE_PASSWORD: remi_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"   # HTTP interface (used by backend)
+      - "9000:9000"   # Native TCP (used by OTel Collector)
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - remi-network
+    restart: unless-stopped
+    healthcheck:
+      # Use 127.0.0.1 (not localhost): inside the container localhost resolves to
+      # IPv6 [::1], but ClickHouse listens on IPv4 only, so localhost gives a false
+      # "Connection refused" and the container is wrongly marked unhealthy.
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # API Backend — Spring Boot
   backend:
     build:
-      context: ./remi-backend
+      context: ./remi-backend-spring
       dockerfile: Dockerfile
     container_name: remi-backend
     ports:
       - "3100:3100"
     environment:
-      NODE_ENV: development
-      PORT: 3100
-      HOST: 0.0.0.0
-      REMI_API_KEY: ${REMI_API_KEY:-test-key-123}
       CORS_ORIGINS: "http://localhost:3000,http://localhost:5173,http://frontend:3000"
-      LOG_LEVEL: INFO
-      # Database
-      DB_HOST: postgres-primary
-      DB_PORT: 5432
-      DB_USER: remi_user
-      DB_PASSWORD: remi_password
-      DB_NAME: remi_db
-      # Read Replica — set to primary for dev (replica streaming not configured)
-      DB_READ_HOST: postgres-primary
-      DB_READ_PORT: 5432
-      # OpenTelemetry
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      OTEL_SERVICE_NAME: remi-backend
-      OTEL_TRACES_SAMPLER: always_on
-      # LLM-as-a-judge (span analysis feature)
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: remi_user
+      CLICKHOUSE_PASSWORD: remi_password
+      CLICKHOUSE_DB: remi
+      POSTGRES_HOST: postgres-primary
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: remi_db
+      POSTGRES_USER: remi_user
+      POSTGRES_PASSWORD: remi_password
+      COLLECTOR_ENDPOINT: http://otel-collector:4318
+      # LLM-as-judge (OpenRouter; falls back to OPENAI_API_KEY if unset)
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      JUDGE_MODEL: ${JUDGE_MODEL:-openai/gpt-4o-mini}
     depends_on:
+      clickhouse:
+        condition: service_healthy
       postgres-primary:
         condition: service_healthy
-    volumes:
-      - ./remi-backend/src:/app/src
-    # Run the bind-mounted workspace source so demo/dev OTEL changes are not
-    # masked by the image's baked dist entrypoint.
-    command: ["bun", "run", "src/index.ts"]
     restart: unless-stopped
     networks:
       - remi-network
@@ -71,19 +88,52 @@ services:
       context: ./remi/remi
       dockerfile: Dockerfile
       args:
-        # VITE_* vars are baked into the static bundle at build time.
-        # Must be browser-reachable (localhost), not Docker-internal hostnames.
-        VITE_API_URL: "http://localhost:3100"
-        VITE_API_KEY: ${REMI_API_KEY:-test-key-123}
+        # Baked into the JS bundle at build time. Empty default = runtime
+        # detection in env.ts: localhost origins call http://localhost:3100,
+        # any other origin (tailscale serve) calls the same-origin /api proxy.
+        VITE_API_URL: "${VITE_API_URL:-}"
+        # Dashboard key for the sample org (seeded in init-db.sql, dev only)
+        VITE_API_KEY: ${REMI_API_KEY:-acme-admin-key}
         VITE_ENV: development
         VITE_ENABLE_DEBUG: "true"
     container_name: remi-frontend
     ports:
       - "3000:3000"
     environment:
-      # These are runtime env vars for the `serve` process — not used by the
-      # static bundle.  VITE_ vars are injected at build time via build.args.
       NODE_ENV: production
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  # Marketing site (static, independent of the platform)
+  marketing:
+    build:
+      context: ./remi-marketing
+      dockerfile: Dockerfile
+    container_name: remi-marketing
+    ports:
+      - "3200:3200"
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  # Demo feeder — loops the example agents against the public demo org so the
+  # marketing site's "View live demo" always has fresh sessions. Needs an LLM
+  # key; exits harmlessly into retry loops without one.
+  demo-feeder:
+    build:
+      context: ./examples
+      dockerfile: Dockerfile
+    container_name: remi-demo-feeder
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://backend:3100
+      REMI_INGEST_KEY: demo-ingest-key
+      REMI_ORG_ID: demo-org
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      FEED_INTERVAL: ${FEED_INTERVAL:-900}
     depends_on:
       - backend
     restart: unless-stopped
@@ -98,7 +148,6 @@ services:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "16686:16686"   # Jaeger UI
-      # Port 4317 (OTLP gRPC) is NOT exposed to host; collector reaches jaeger over remi-network
     networks:
       - remi-network
     restart: unless-stopped
@@ -109,16 +158,20 @@ services:
     container_name: otel-collector
     command: ["--config=/etc/otelcol-contrib/otel-collector-config.yaml"]
     environment:
-      REMI_API_KEY: ${REMI_API_KEY:-test-key-123}
-      REMI_ORG_ID: ${REMI_ORG_ID:-demo-org}
-      REMI_AGENT_ID: ${REMI_AGENT_ID:-demo-agent}
+      CLICKHOUSE_USER: remi_user
+      CLICKHOUSE_PASSWORD: remi_password
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol-contrib/otel-collector-config.yaml:ro
     ports:
-      - "4318:4318"     # OTLP HTTP (backend/worker → collector)
+      # Loopback only — external ingest must go through the backend's
+      # authenticated /v1/traces proxy on :3100. For tailnet ingest, point
+      # `tailscale serve` at the backend instead of this port.
+      - "127.0.0.1:4318:4318"
     depends_on:
-      - jaeger
-      - backend
+      jaeger:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
     networks:
       - remi-network
     restart: unless-stopped
@@ -129,3 +182,4 @@ networks:
 
 volumes:
   postgres_primary_data:
+  clickhouse_data:

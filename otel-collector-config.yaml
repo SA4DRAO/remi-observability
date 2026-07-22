@@ -1,36 +1,151 @@
 receivers:
   otlp:
     protocols:
+      # HTTP only. Authenticated ingest goes through the backend proxy
+      # (POST backend:3100/v1/traces with an org API key) which forwards here
+      # with X-Remi-Org set from the validated key. include_metadata makes that
+      # header available to the attributes processor below. The host port is
+      # bound to 127.0.0.1 only — the backend is the public ingest path.
       http:
         endpoint: 0.0.0.0:4318
+        include_metadata: true
 
 processors:
   batch:
     timeout: 1s
     send_batch_size: 1024
 
+  # Stamp the validated org (X-Remi-Org, set by the backend ingest proxy) onto
+  # each span, then promote it to a resource attribute so session/analytics
+  # queries and rollup MVs can scope by org.
+  attributes/org:
+    actions:
+      - key: remi.org_id
+        from_context: metadata.x-remi-org
+        action: upsert
+
+  transform/org:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(resource.attributes["remi.org_id"], attributes["remi.org_id"]) where attributes["remi.org_id"] != nil
+          - delete_key(attributes, "remi.org_id")
+
+  # Same promotion for the metrics signal: the attributes processor writes the
+  # org onto datapoint attributes; move it to the resource so metric queries
+  # scope the same way trace queries do.
+  transform/org_metrics:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(resource.attributes["remi.org_id"], attributes["remi.org_id"]) where attributes["remi.org_id"] != nil
+          - delete_key(attributes, "remi.org_id")
+
+  # PII redaction — patterns are stripped before data reaches ClickHouse.
+  # Per-org rules live in the pii_policies PostgreSQL table; a future sync
+  # endpoint will hot-reload this config. The patterns below are the baseline
+  # applied to all orgs.
+  redaction:
+    allow_all_keys: true
+    blocked_values:
+      - '\b\d{3}-\d{2}-\d{4}\b'                                         # SSN
+      - '\b4[0-9]{12}(?:[0-9]{3})?\b'                                   # Visa
+      - '\b5[1-5][0-9]{14}\b'                                            # Mastercard
+      - '[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'             # Email
+    summary: debug
+
+  # Drop self-instrumentation spans so Remi's own backend traces don't
+  # pollute customer session data. Spans with service.namespace=remi-internal
+  # are filtered at the resource level.
+  filter/drop_internal:
+    error_mode: ignore
+    traces:
+      span:
+        - 'resource.attributes["service.namespace"] == "remi-internal"'
+
+  # Claude Code's Traces beta represents each model call two ways: a reliable
+  # `claude_code.llm_request` span (tokens as input_tokens/output_tokens/cache_read_tokens)
+  # and a flaky gen_ai-native `chat <model>` span that only sometimes appears. We
+  # normalize llm_request below and drop the chat duplicate so calls/tokens aren't
+  # double-counted. Scoped to service.name=claude-code so semconv-standard sources
+  # (which legitimately name LLM spans "chat <model>") are not dropped.
+  filter/drop_cc_dup:
+    error_mode: ignore
+    traces:
+      span:
+        - 'IsMatch(name, "^chat ") and resource.attributes["service.name"] == "claude-code"'
+
+  # Normalize Claude Code spans onto Remi's gen_ai conventions:
+  #  - conversation.id = session.id, so the whole claude_code.* hierarchy folds into
+  #    a single Remi session per Claude Code session (otherwise one session per turn).
+  #  - copy Claude Code's token attrs onto gen_ai.usage.* so the backend sums them.
+  transform/claude_code:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["gen_ai.conversation.id"], attributes["session.id"]) where attributes["session.id"] != nil and attributes["gen_ai.conversation.id"] == nil
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"]) where attributes["input_tokens"] != nil and attributes["gen_ai.usage.input_tokens"] == nil
+          - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["output_tokens"] != nil and attributes["gen_ai.usage.output_tokens"] == nil
+          - set(attributes["gen_ai.usage.cache_read_input_tokens"], attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil and attributes["gen_ai.usage.cache_read_input_tokens"] == nil
+          # The top-level tool span is INTERNAL; retag it CLIENT so Remi counts it as a
+          # tool call and colors it accordingly. (Child execution/blocked spans stay INTERNAL.)
+          - set(kind, SPAN_KIND_CLIENT) where attributes["span.type"] == "tool"
+          # Normalize legacy/vendor GenAI attribute aliases onto Remi's canonical keys.
+          # openllmetry (opentelemetry-instrumentation-langchain, used by examples/) emits
+          # prompt_tokens/completion_tokens on some paths and a dotted cache_read.input_tokens
+          # key; its tool spans arrive INTERNAL tagged traceloop.span.kind=tool (RemiCallback
+          # uses remi.span_type=tool). Without these mappings, tokens/cache/tool counts read 0.
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["gen_ai.usage.prompt_tokens"]) where attributes["gen_ai.usage.prompt_tokens"] != nil and attributes["gen_ai.usage.input_tokens"] == nil
+          - set(attributes["gen_ai.usage.output_tokens"], attributes["gen_ai.usage.completion_tokens"]) where attributes["gen_ai.usage.completion_tokens"] != nil and attributes["gen_ai.usage.output_tokens"] == nil
+          - set(attributes["gen_ai.usage.cache_read_input_tokens"], attributes["gen_ai.usage.cache_read.input_tokens"]) where attributes["gen_ai.usage.cache_read.input_tokens"] != nil and attributes["gen_ai.usage.cache_read_input_tokens"] == nil
+          - set(kind, SPAN_KIND_CLIENT) where attributes["traceloop.span.kind"] == "tool"
+          - set(kind, SPAN_KIND_CLIENT) where attributes["remi.span_type"] == "tool"
+
 exporters:
   otlp/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
-  
-  otlphttp/backend:
-    endpoint: http://remi-backend:3100/api/v1/traces
-    encoding: json
-    headers:
-      x-api-key: "${env:REMI_API_KEY}"
-      # OTEL-native identity: collector stamps every forwarded batch with
-      # the deployment's org and agent so OpenRouter broadcasts (and any
-      # other external source) don't need to set resource attributes.
-      x-remi-org-id: "${env:REMI_ORG_ID}"
-      x-remi-agent-id: "${env:REMI_AGENT_ID}"
-    tls:
-      insecure: true
+
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
+    username: ${env:CLICKHOUSE_USER}
+    password: ${env:CLICKHOUSE_PASSWORD}
+    database: remi
+    create_schema: true
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 100
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [otlp/jaeger, otlphttp/backend]
+      processors: [attributes/org, transform/org, filter/drop_internal, filter/drop_cc_dup, transform/claude_code, redaction, batch]
+      exporters: [otlp/jaeger, clickhouse]
+    # Logs pipeline retained for completeness (Claude Code can still emit api_request
+    # events as logs), but with Traces beta enabled, sessions are built from real
+    # spans — the old otel_logs -> otel_traces materialized view is removed so the
+    # same call isn't counted twice.
+    logs:
+      receivers: [otlp]
+      # redaction processor doesn't support the logs signal type in this collector
+      # version, so logs use batch only (plus org stamping).
+      processors: [attributes/org, batch]
+      exporters: [clickhouse]
+    # Claude Code also emits metrics (token/cost counters). Persist them so they
+    # don't 404, and so they're available for future Remi aggregates.
+    metrics:
+      receivers: [otlp]
+      processors: [attributes/org, transform/org_metrics, batch]
+      exporters: [clickhouse]

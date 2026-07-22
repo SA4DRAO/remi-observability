@@ -1,35 +1,35 @@
-/**
- * useSpans — fetches spans (OTLP events) for a session via GET /api/v1/events?session_id=X
- */
-
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../utils/api-client";
 import { logger } from "../utils/logger";
-import type { SpanV2, SpansV2Response } from "../types/v2";
+import type { Span, Pagination } from "../types";
+
+interface SpansResponse {
+  spans: Span[];
+  pagination: Pagination;
+}
 
 interface UseSpansParams {
+  kind?: string;
   limit?: number;
   offset?: number;
 }
 
 export function useSpans(sessionId: string | null, params: UseSpansParams = {}) {
-  const { limit = 200, offset = 0 } = params;
+  const { kind, limit = 200, offset = 0 } = params;
 
-  const { data, isPending, isLoading, error, refetch } = useQuery<SpansV2Response>({
-    queryKey: ["spans-v2", sessionId, limit, offset],
+  const { data, isPending, isLoading, error, refetch } = useQuery<SpansResponse>({
+    queryKey: ["spans", sessionId, kind ?? "", limit, offset],
     queryFn: async () => {
-      if (!sessionId) return { events: [], pagination: { limit, offset, total: 0, hasMore: false } };
+      if (!sessionId) return { spans: [], pagination: { limit, offset, total: 0, has_more: false } };
       try {
-        const queryParams: Record<string, string | number> = {
-          session_id: sessionId,
-          limit,
-          offset,
-        };
-        const envelope = await apiClient.get<{ success: boolean; data: SpansV2Response }>("/api/v1/events", {
-          params: queryParams,
-        });
+        const queryParams: Record<string, string | number> = { limit, offset };
+        if (kind) queryParams.kind = kind;
+
+        const envelope = await apiClient.get<{ success: boolean; data: SpansResponse }>(
+          `/api/v1/sessions/${sessionId}/spans`, { params: queryParams }
+        );
         const response = envelope.data;
-        logger.debug(`Fetched ${response.events.length} spans for session ${sessionId}`);
+        logger.debug(`Fetched ${response.spans.length} spans for session ${sessionId}`);
         return response;
       } catch (e) {
         logger.error("Failed to fetch spans", e);
@@ -44,9 +44,9 @@ export function useSpans(sessionId: string | null, params: UseSpansParams = {}) 
   });
 
   return {
-    spans: data?.events ?? [],
+    spans: data?.spans ?? [],
     total: data?.pagination?.total ?? 0,
-    hasMore: data?.pagination?.hasMore ?? false,
+    hasMore: data?.pagination?.has_more ?? false,
     isPending,
     isLoading,
     error: error instanceof Error ? error : null,

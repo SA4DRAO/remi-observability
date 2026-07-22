@@ -131,19 +131,17 @@ export function GlobalSearch({ onSessionSelect }: GlobalSearchProps) {
                           <span className="truncate font-mono text-xs font-medium">
                             {r.span_name}
                           </span>
-                          {r.model_name && (
+                          {r.model && (
                             <Badge variant="secondary" className="shrink-0 font-mono text-[9px] px-1 py-0">
-                              {r.model_name}
+                              {r.model}
                             </Badge>
                           )}
-                          <Badge variant="outline" className="shrink-0 text-[9px] px-1 py-0 text-muted-foreground">
-                            {r.matched_key}
+                          <Badge variant="outline" className={`shrink-0 text-[9px] px-1 py-0 ${
+                            r.status === "error" ? "border-red-400 text-red-600" : "text-muted-foreground"
+                          }`}>
+                            {r.status}
                           </Badge>
                         </div>
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {/* strip HTML from ts_headline output */}
-                          {r.snippet.replace(/<[^>]+>/g, "")}
-                        </p>
                         <p className="mt-0.5 font-mono text-[10px] text-muted-foreground/70 truncate">
                           session: {r.session_id}
                         </p>

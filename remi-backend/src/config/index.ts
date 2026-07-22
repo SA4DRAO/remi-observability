@@ -40,6 +40,13 @@ export function loadConfig(): ServerConfig {
       process.env.CORS_ORIGINS,
       ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173']
     ),
+    clickhouse: {
+      host: process.env.CLICKHOUSE_HOST ?? 'localhost',
+      port: parsePositiveInt(process.env.CLICKHOUSE_PORT, 8123, 'CLICKHOUSE_PORT'),
+      username: process.env.CLICKHOUSE_USER ?? 'remi_user',
+      password: process.env.CLICKHOUSE_PASSWORD ?? '',
+      database: process.env.CLICKHOUSE_DB ?? 'remi',
+    },
   };
 }
 
@@ -47,7 +54,6 @@ export function validateConfig(config: ServerConfig): void {
   if (config.port < 1 || config.port > 65535) {
     throw new Error('PORT must be between 1 and 65535');
   }
-
   if (config.corsOrigins.length === 0) {
     throw new Error('At least one CORS origin must be specified');
   }

@@ -20,7 +20,6 @@ import {
   YAxis,
 } from "recharts";
 import { useAnalytics } from "../../hooks/useAnalytics";
-import { VersionComparison } from "../VersionComparison";
 import { formatLatency } from "../../utils/format";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -395,8 +394,6 @@ export function AnalyticsPage() {
         </Card>
       )}
 
-      {/* Version comparison — regression view across service.version releases */}
-      <VersionComparison agentId={appliedAgent || undefined} />
     </div>
   );
 }

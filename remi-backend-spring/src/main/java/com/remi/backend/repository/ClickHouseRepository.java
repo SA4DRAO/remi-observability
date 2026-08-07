@@ -38,9 +38,26 @@ public class ClickHouseRepository {
     private static final String HAS_END_SIGNAL =
             "(countIf(empty(ParentSpanId)) + countIf(SpanName = 'remi.session.end')) > 0";
 
-    // Average duration of LLM spans, in ms.
+    /**
+     * An LLM span that counts as a latency measurement. The duration ceiling is
+     * not a "slow call" filter — a span lasting hours is one whose end never got
+     * recorded (hung request, killed process, retry loop held open), and feeding
+     * it to a mean reports a number no user ever experienced. Observed in the
+     * demo org: one 33-hour errored span pulled the org-wide average from 1.9s
+     * to 14.4s, i.e. above its own p95.
+     *
+     * ponytail: a flat ceiling, not outlier detection. 10 min is far above any
+     * real completion (p99 here is ~10s) and far below a stuck span. If agents
+     * ever legitimately run longer, raise it — this is a calibration knob.
+     */
+    private static final String LLM_MEASURABLE =
+            "notEmpty(Model) AND Duration < 600000000000";
+
     private static final String AVG_LLM_LATENCY =
-            "round(avgIf(Duration / 1000000, notEmpty(Model)))";
+            "round(avgIf(Duration / 1000000, " + LLM_MEASURABLE + "))";
+
+    private static final String P95_LLM_LATENCY =
+            "round(quantileIf(0.95)(Duration / 1000000, " + LLM_MEASURABLE + "))";
 
     private static final String VERSION_EXPR =
             "if(notEmpty(ServiceVersion), ServiceVersion, 'unversioned')";
@@ -322,10 +339,10 @@ public class ClickHouseRepository {
                     sum(CacheTokens)                                                               AS cache_tokens,
                     uniqExactIf(SessionId, StatusCode = 'STATUS_CODE_ERROR')                       AS error_sessions,
                     %s                                                                             AS avg_llm_latency_ms,
-                    round(quantileIf(0.95)(Duration / 1000000, notEmpty(Model)))                   AS p95_llm_latency_ms
+                    %s                                                                             AS p95_llm_latency_ms
                 FROM otel_traces
                 %s
-                """.formatted(AVG_LLM_LATENCY, whereClause),
+                """.formatted(AVG_LLM_LATENCY, P95_LLM_LATENCY, whereClause),
                 params);
 
         long sessions = 0, llmCalls = 0, inputTokens = 0, outputTokens = 0, cacheTokens = 0, errorSessions = 0;
@@ -447,7 +464,7 @@ public class ClickHouseRepository {
                     countIf(notEmpty(Model))                                                       AS llm_calls,
                     uniqExactIf(SessionId, StatusCode = 'STATUS_CODE_ERROR')                       AS error_sessions,
                     %s                                                                             AS avg_llm_latency_ms,
-                    round(quantileIf(0.95)(Duration / 1000000, notEmpty(Model)))                   AS p95_llm_latency_ms,
+                    %s                                                                             AS p95_llm_latency_ms,
                     sum(InputTokens + OutputTokens)                                                AS total_tokens,
                     min(Timestamp)                                                                 AS first_seen,
                     max(Timestamp)                                                                 AS last_seen
@@ -457,7 +474,7 @@ public class ClickHouseRepository {
                 HAVING notEmpty(agent)
                 ORDER BY agent ASC, last_seen DESC
                 LIMIT 200
-                """.formatted(VERSION_EXPR, AVG_LLM_LATENCY, where),
+                """.formatted(VERSION_EXPR, AVG_LLM_LATENCY, P95_LLM_LATENCY, where),
                 params);
 
         // Judge verdicts per (agent, version): map each analyzed span back to the
@@ -683,11 +700,44 @@ public class ClickHouseRepository {
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
-    public List<Map<String, Object>> searchSpans(String orgId, String query, int limit) {
+    /**
+     * Free-text span search. Always matches span name and model; when
+     * {@code includePrompts} is set (caller holds read:prompts) it also matches
+     * the prompt/completion attribute values and returns the matching excerpt.
+     *
+     * Prompt matching is scope-gated on purpose: without the gate a key that
+     * cannot READ prompts could still probe their contents a guess at a time by
+     * watching which queries return hits.
+     *
+     * ponytail: scans the SpanAttributes map, which the materialized columns
+     * exist to avoid. Fine here — search is user-triggered, LIMITed, and there
+     * is no way to full-text a map without reading it. If it gets slow, the
+     * upgrade is a token bloom index on the prompt values.
+     */
+    public List<Map<String, Object>> searchSpans(String orgId, String query, int limit,
+                                                 boolean includePrompts) {
         var params = new MapSqlParameterSource();
         params.addValue("limit", limit);
         params.addValue("org_id", orgId);
         params.addValue("query", "%" + query.toLowerCase() + "%");
+        params.addValue("raw_query", query);
+
+        // Keep in sync with JudgeService.isPromptAttr — same keys the API redacts.
+        String promptKey = """
+                (startsWith(k, 'gen_ai.prompt') OR startsWith(k, 'gen_ai.completion')
+                 OR startsWith(k, 'gen_ai.input') OR startsWith(k, 'gen_ai.output')
+                 OR startsWith(k, 'gen_ai.task.') OR k = 'gen_ai.system_instructions'
+                 OR k = 'traceloop.entity.input' OR k = 'traceloop.entity.output')""";
+
+        String matchedValues = includePrompts
+                ? """
+                  arrayFilter((v, k) -> %s AND positionCaseInsensitive(v, :raw_query) > 0,
+                              mapValues(SpanAttributes), mapKeys(SpanAttributes))"""
+                  .formatted(promptKey)
+                : "[]";
+
+        String promptPredicate = includePrompts ? "OR notEmpty(%s)".formatted(matchedValues) : "";
+
         return jdbc.queryForList("""
                 SELECT
                     SpanId                                          AS span_id,
@@ -699,14 +749,19 @@ public class ClickHouseRepository {
                         WHEN 'STATUS_CODE_ERROR' THEN 'error'
                         WHEN 'STATUS_CODE_OK' THEN 'ok'
                         ELSE 'unset'
-                    END                                             AS status
+                    END                                             AS status,
+                    if(empty(%1$s), '',
+                       substring(%1$s[1],
+                                 greatest(1, positionCaseInsensitive(%1$s[1], :raw_query) - 48),
+                                 160))                              AS snippet
                 FROM otel_traces
                 WHERE OrgId = :org_id
                   AND (lower(SpanName) LIKE :query
-                   OR lower(Model) LIKE :query)
+                   OR lower(Model) LIKE :query
+                   %2$s)
                 ORDER BY Timestamp DESC
                 LIMIT :limit
-                """,
+                """.formatted(matchedValues, promptPredicate),
                 params);
     }
 

@@ -149,7 +149,14 @@ public class SessionController {
         if (query == null || query.trim().length() < 2) {
             return ApiResponse.ok(List.of());
         }
-        return ApiResponse.ok(repo.searchSpans(ctx.orgId(), query.trim(), limit));
+        // Searching prompt bodies is a prompt read: same scope, same audit trail.
+        boolean canReadPrompts = ctx.hasScope("read:prompts");
+        var results = repo.searchSpans(ctx.orgId(), query.trim(), limit, canReadPrompts);
+        if (canReadPrompts && results.stream().anyMatch(r -> !String.valueOf(
+                r.getOrDefault("snippet", "")).isEmpty())) {
+            identity.audit(ctx.orgId(), ctx.keyId(), "read:prompt_content", "search", query.trim());
+        }
+        return ApiResponse.ok(results);
     }
 
     // GET /api/v1/sessions/spans/:spanId/attributes

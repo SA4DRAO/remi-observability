@@ -142,6 +142,11 @@ export function GlobalSearch({ onSessionSelect }: GlobalSearchProps) {
                             {r.status}
                           </Badge>
                         </div>
+                        {r.snippet && (
+                          <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                            …{r.snippet}…
+                          </p>
+                        )}
                         <p className="mt-0.5 font-mono text-[10px] text-muted-foreground/70 truncate">
                           session: {r.session_id}
                         </p>

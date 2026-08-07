@@ -1,13 +1,14 @@
 import { useCallback, useState } from "react";
-import { Activity, BarChart3 } from "lucide-react";
+import { Activity, BarChart3, GitCompare } from "lucide-react";
 import { AnalyticsPage } from "./components/Pages/AnalyticsPage";
 import { SessionDetailPage } from "./components/Pages/SessionDetailPage";
 import { SessionsPage } from "./components/Pages/SessionsPage";
+import { VersionComparison } from "./components/VersionComparison";
 import { GlobalSearch } from "./components/GlobalSearch";
 import { ThemeToggle } from "./components/ui/theme-toggle";
 import { TooltipProvider } from "./components/ui/tooltip";
 
-type Page = "sessions" | "analytics";
+type Page = "sessions" | "analytics" | "versions";
 
 function Navigation({
   activePage,
@@ -56,6 +57,17 @@ function Navigation({
             >
               <BarChart3 className="h-3.5 w-3.5" />
               Analytics
+            </button>
+            <button
+              onClick={() => onNavigate("versions")}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                activePage === "versions"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+              }`}
+            >
+              <GitCompare className="h-3.5 w-3.5" />
+              Versions
             </button>
           </nav>
         </div>
@@ -115,6 +127,8 @@ function App() {
             />
           ) : activePage === "analytics" ? (
             <AnalyticsPage />
+          ) : activePage === "versions" ? (
+            <VersionComparison />
           ) : (
             <SessionsPage
               onSelectSession={handleSelectSession}

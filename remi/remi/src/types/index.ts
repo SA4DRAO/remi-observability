@@ -150,6 +150,8 @@ export interface SpanSearchResult {
   span_name: string;
   model: string | null;
   status: string;
+  /** Excerpt of the matching prompt/completion; "" when the match was on name/model. */
+  snippet?: string;
 }
 
 // ─── Span analysis ────────────────────────────────────────────────────────────

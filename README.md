@@ -9,7 +9,7 @@ LLM-as-judge verdicts — org-scoped, self-hosted, on ClickHouse.
 
 ```bash
 # 1. Start the stack (ClickHouse, Postgres, collector, backend, dashboard)
-git clone <this repo> && cd Remi
+git clone https://github.com/SA4DRAO/remi-observability.git && cd remi-observability
 docker compose up -d --build
 
 # 2. Point ANY OpenTelemetry SDK at Remi — zero code, env vars only

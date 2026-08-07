@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Remi is an LLM observability platform: LangChain agents (or any OTLP source) export
 traces through an authenticated ingest proxy into ClickHouse, and a dashboard reads
-sessions, spans, cost, and LLM-as-judge verdicts per organization.
+sessions, spans, latency, and LLM-as-judge verdicts per organization.
 
 ## Package Map
 
@@ -17,6 +17,9 @@ sessions, spans, cost, and LLM-as-judge verdicts per organization.
 | `examples/` | Python / LangChain / LangGraph | Prod-style demo agents exercising the full pipeline |
 | `remi-backend/` | TypeScript / Bun / Express | **Legacy — superseded by Spring; do not extend** |
 | `remi-marketing/` | React / Tailwind | Marketing site (independent) |
+
+Per-package deep-dives: `remi/remi/CLAUDE.md` (dashboard hooks/views, VITE_* key
+resolution) and `examples/CLAUDE.md` (zero-code launch env, instrumentation gotchas).
 
 ## Architecture: Event Flow
 
@@ -142,15 +145,21 @@ bun run build
 ### Examples (`examples/`)
 ```bash
 cd examples && source venv/bin/activate
-pip install -r requirements.txt
-python customer_support_agent.py    # needs OPENROUTER_API_KEY or OPENAI_API_KEY in root .env
+pip install -r requirements.txt   # needs OPENROUTER_API_KEY or OPENAI_API_KEY in root .env
+OTEL_SERVICE_NAME=support-agent opentelemetry-instrument python customer_support_agent.py
 ```
-Agents export to `http://localhost:3100` with `REMI_INGEST_KEY` (default
-`acme-ingest-key`); LLM calls go through OpenRouter when `OPENROUTER_API_KEY`
-is set, else direct OpenAI (`llm_env()` in `otel_setup.py`).
+Agents contain **zero telemetry code** — instrumentation is entirely
+`opentelemetry-instrument` + `OTEL_*` env (bearer `acme-ingest-key`, endpoint
+`http://localhost:3100`); plain `python agent.py` runs the agent but exports no
+spans. LLM calls go through OpenRouter when `OPENROUTER_API_KEY` is set, else
+direct OpenAI. Full launch env + gotchas: `examples/CLAUDE.md`.
 
 ## Key Constraints
 
+- **No automated test suites** — `remi-backend-spring/src/test` is empty; frontend
+  and examples have no test runner. Closest checks: `bun run type-check` (frontend)
+  and `scripts/benchmark.sh` (query perf). Verify pipeline changes against live
+  ClickHouse span/session counts, not a green test run.
 - `VITE_*` env vars are baked into the frontend bundle at build time (compose build args).
 - The collector's host port 4318 is loopback-only; external ingest must use the
   backend proxy so the org key is enforced.

@@ -504,14 +504,14 @@ public class ClickHouseRepository {
                 new MapSqlParameterSource("org_id", orgId));
 
         Map<String, Map<String, Object>> judgeByKey = new HashMap<>();
-        for (var r : judgeRows) judgeByKey.put(r.get("agent") + " " + r.get("version"), r);
+        for (var r : judgeRows) judgeByKey.put(r.get("agent") + "\0" + r.get("version"), r);
         Map<String, Map<String, Object>> sysByKey = new HashMap<>();
-        for (var r : sysRows) sysByKey.put(r.get("agent") + " " + r.get("version"), r);
+        for (var r : sysRows) sysByKey.put(r.get("agent") + "\0" + r.get("version"), r);
 
         return rows.stream().map(r -> {
             long sessions = toLong(r.get("sessions"));
             long errorSessions = toLong(r.get("error_sessions"));
-            String key = r.get("agent") + " " + r.get("version");
+            String key = r.get("agent") + "\0" + r.get("version");
             var judge = judgeByKey.get(key);
             var sys = sysByKey.get(key);
             Double cpu = sys != null ? toFiniteDouble(sys.get("avg_cpu_pct")) : null;

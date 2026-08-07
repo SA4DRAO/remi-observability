@@ -306,7 +306,8 @@ export function SessionsPage({
               <Zap className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
               <p className="text-sm font-medium">No sessions found</p>
               <p className="mt-1 text-xs text-muted-foreground">
-                Send OTLP traces to the collector at port 4318.
+                Send OTLP traces to http://localhost:3100 with your org API key
+                as <code>Authorization: Bearer &lt;key&gt;</code>.
               </p>
             </div>
           ) : (

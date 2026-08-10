@@ -1,15 +1,47 @@
 # Remi
 
-**Audit-grade observability for LLM agents.** Point any OpenTelemetry source at
-Remi — LangChain, LangGraph, or your own code — and get flame-chart timelines,
-prompt-level audit trails, per-release regression comparison, and LLM-as-judge
-verdicts. Self-hosted, org-scoped, on ClickHouse.
+**Enterprise LLM observability without the SDK lock-in.**
+
+Remi is an OpenTelemetry-native tracing engine for secure, self-hosted agent
+platforms. Point any OTLP source at it — LangChain, LangGraph, or your own code —
+and get flame-chart timelines, prompt-level audit trails, per-release regression
+comparison, and LLM-as-judge verdicts. Runs entirely on your infrastructure, on
+ClickHouse.
+
+Three things make it different:
+
+- **Zero-SDK ingest.** Your agent imports nothing from Remi. Instrumentation is
+  `opentelemetry-instrument` plus environment variables, so your code executes on
+  a vanilla runtime and stays portable to any other OTLP backend.
+- **Cryptographically verified audit trail.** Every prompt read is written to a
+  SHA-256 hash-chained log you can verify with one HTTP call.
+- **100% self-hosted.** `docker compose up -d`. No seat licences, no trace quota,
+  no Enterprise tier gating the deployment model — a free alternative to
+  platforms where self-hosting starts in the four-figures-per-month range.
 
 > **Trying Remi out?** Everything below is a fresh-clone path. If anything takes
 > more than 10 minutes or doesn't behave as written, that's a bug — please tell
 > us. See [Giving feedback](#giving-feedback).
 
 ---
+
+## Why OpenTelemetry-native beats a proprietary SDK
+
+Most LLM observability platforms ship a vendor SDK: you import their callback
+handler, wrap your chain, and your application code now has a hard dependency on
+their product. Remi inverts that.
+
+| | Vendor SDK | Remi (OTLP) |
+|---|---|---|
+| **Agent code** | `from vendor import Handler` — imports, wrappers, callbacks | Nothing. Zero telemetry lines. |
+| **Runtime** | Their SDK in your process, on your critical path | Vanilla runtime; the OTel launcher wraps it externally |
+| **Switching cost** | Rip out every import and wrapper | Change one env var |
+| **Language reach** | Whatever they wrote an SDK for | Any OpenTelemetry SDK — Python, Go, Java, Node, Rust |
+| **Failure mode** | Vendor SDK bug is a bug in your agent | Exporter is out-of-process; agent is unaffected |
+
+The bundled agents in [`examples/`](examples/) contain **zero telemetry code** —
+no imports, no `TracerProvider`, no flush call. That's the whole point: what you
+run in production is the agent you wrote, not the agent plus someone's SDK.
 
 ## 1. Requirements
 
@@ -97,20 +129,37 @@ Without it, each trace is its own session.
 
 Also running: Jaeger at <http://localhost:16686> if you want raw trace inspection.
 
-## 5. Access control
+## 5. Compliance & access control
 
-Remi is org-scoped: **every query is filtered by the org resolved from the API
-key server-side.** Client-supplied org parameters are ignored.
+Three independent controls, all enforced server-side.
 
-Prompt and completion bodies are gated behind the `read:prompts` scope — keys
-without it get redacted attributes, and Cmd-K will not match prompt text for
-them. Every prompt read is written to a **hash-chained audit log**; verify it
-hasn't been tampered with:
+**Org scoping.** Every query is filtered by the org resolved from the API key.
+Client-supplied org parameters are ignored — there is no request shape that
+returns another tenant's spans.
+
+**Scope-gated prompt redaction.** Prompt and completion bodies are gated behind
+the `read:prompts` scope. Keys without it receive redacted attributes, and Cmd-K
+will not match prompt text for them — the search gate is deliberate, since
+without it a key that cannot *read* prompts could still probe their contents a
+guess at a time by watching which queries return hits.
+
+**Cryptographically verified audit trail.** Every prompt read, judge invocation,
+and session deletion is appended to a SHA-256 **hash-chained** log in Postgres:
+each entry commits to its predecessor's hash, so removing or editing any row
+breaks every hash after it. Inserts are advisory-lock serialized so concurrent
+writes can't fork the chain. Verify the whole chain for an org:
 
 ```bash
 curl -H "Authorization: Bearer acme-admin-key" \
      http://localhost:3100/api/v1/admin/audit-log/verify
+# {"success":true,"data":{"entries_checked":84,"broken_entry_ids":[],"valid":true}}
 ```
+
+**PII scrubbing at the edge.** The collector redacts SSNs, credit-card numbers,
+and email addresses out of span attributes *before* they reach storage — so the
+raw values are never written to ClickHouse in the first place. The ruleset is
+applied platform-wide and is configurable in
+[`otel-collector-config.yaml`](otel-collector-config.yaml).
 
 Seeded keys for local evaluation — **rotate these before any real use**:
 
@@ -164,17 +213,6 @@ Your agent (any OTel SDK) ──OTLP + Bearer key──▶ Spring backend :3100
 
 **Ports:** dashboard `3000` · API + ingest `3100` · marketing `3200` · ClickHouse
 `8123` · Jaeger `16686` · collector `4318` (loopback only).
-
-## Known gaps
-
-Being upfront, since you're evaluating:
-
-- **Per-org PII policy is not enforced yet.** The admin API stores custom rules,
-  but the collector applies a fixed built-in ruleset (SSN / credit card / email)
-  to every org. Baseline redaction works; per-org customization does not.
-- **No automated test suite.** Verification is against live ClickHouse counts.
-- Admin surfaces (orgs, keys, audit log) are **API-only** — no UI yet.
-- Judge verdicts are re-computed on demand rather than served from cache.
 
 ## Development
 

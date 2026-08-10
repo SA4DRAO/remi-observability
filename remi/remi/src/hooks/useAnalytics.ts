@@ -10,7 +10,7 @@ interface UseAnalyticsOptions extends AnalyticsQueryParams {
 export function useAnalytics(options: UseAnalyticsOptions = {}) {
   const { pollingInterval = 60_000, org_id, agent_id, date_from, date_to, days = 30 } = options;
 
-  const { data, isPending, isFetching, error, refetch } = useQuery<Analytics>({
+  const { data, dataUpdatedAt, isPending, isFetching, error, refetch } = useQuery<Analytics>({
     queryKey: ["analytics", org_id ?? "", agent_id ?? "", date_from ?? "", date_to ?? "", days],
     queryFn: async () => {
       try {
@@ -38,6 +38,8 @@ export function useAnalytics(options: UseAnalyticsOptions = {}) {
 
   return {
     analytics: data ?? null,
+    /** epoch ms of the last successful fetch — drives the "updated Ns ago" clock */
+    dataUpdatedAt,
     isPending,
     isFetching,
     error: error instanceof Error ? error : null,
@@ -45,13 +47,19 @@ export function useAnalytics(options: UseAnalyticsOptions = {}) {
   };
 }
 
-/** Per-service.version regression comparison: latency, errors, judge scores. */
-export function useVersionComparison(agentId?: string) {
+/**
+ * Per-service.version regression comparison: latency, errors, judge scores.
+ * Takes the same window as useAnalytics — the overview mixes the two feeds
+ * (regression alerts, the agent table's p95), so an unscoped version query
+ * would date-mismatch every row it lands next to.
+ */
+export function useVersionComparison(agentId?: string, dateFrom?: string) {
   const { data, isPending, error } = useQuery<VersionStats[]>({
-    queryKey: ["version-comparison", agentId ?? ""],
+    queryKey: ["version-comparison", agentId ?? "", dateFrom ?? ""],
     queryFn: async () => {
       const params: Record<string, string> = {};
       if (agentId) params.agent_id = agentId;
+      if (dateFrom) params.date_from = dateFrom;
       const envelope = await apiClient.get<{ success: boolean; data: VersionStats[] }>(
         "/api/v1/analytics/versions", { params }
       );

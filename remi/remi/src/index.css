@@ -29,6 +29,12 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-chart-err: var(--chart-err);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-info: var(--info);
+  --color-subtle: var(--subtle);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -45,18 +51,198 @@
   --breakpoint-2xl: 1400px;
 }
 
+/* Dense console primitives. The dashboard is a data console: one shared set of
+   surfaces, tables and controls at a 12px base, instead of per-element utility
+   soup. Everything below is plain CSS so it stays readable next to the tokens. */
 @layer components {
-  .container {
+  .shell {
     width: 100%;
-    margin-left: auto;
-    margin-right: auto;
-    padding-left: 2rem;
-    padding-right: 2rem;
+    max-width: 1440px;
+    margin-inline: auto;
+    padding-inline: 24px;
   }
-  @media (min-width: 1400px) {
-    .container {
-      max-width: 1400px;
-    }
+
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    overflow: hidden;
+  }
+
+  /* 10px uppercase tracked label — every metric and section caption uses it */
+  .kicker {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--muted-foreground);
+  }
+  .sect-title {
+    margin: 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+  }
+  .sect-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .sect-note {
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+
+  .dtable {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .dtable th {
+    text-align: left;
+    white-space: nowrap;
+    font-weight: 500;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted-foreground);
+    background: var(--subtle);
+    border-bottom: 1px solid var(--border);
+    padding: 9px 16px;
+  }
+  .dtable td {
+    padding: 8px 16px;
+    font-size: 12px;
+  }
+  .dtable tbody tr {
+    border-top: 1px solid var(--border);
+  }
+  .dtable tbody tr:hover {
+    background: var(--muted);
+  }
+  .dtable .num,
+  .dtable th.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .dtable .dim {
+    color: var(--muted-foreground);
+  }
+
+  /* 28px control height is the header/scope-bar rhythm */
+  .ctl {
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--input);
+    background: var(--background);
+    color: var(--foreground);
+    padding: 0 9px;
+    font-size: 11px;
+  }
+  button.ctl,
+  select.ctl {
+    cursor: pointer;
+  }
+  button.ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  button.ctl:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .ctl-sm {
+    height: 24px;
+    font-size: 10px;
+    padding: 0 8px;
+  }
+
+  .seg {
+    display: flex;
+    height: 28px;
+    border: 1px solid var(--input);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .seg button {
+    border: 0;
+    padding: 0 10px;
+    font-size: 11px;
+    cursor: pointer;
+    background: var(--background);
+    color: var(--muted-foreground);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .seg button + button {
+    border-left: 1px solid var(--input);
+  }
+  .seg button[aria-pressed="true"] {
+    background: var(--foreground);
+    color: var(--background);
+  }
+  .seg-sm {
+    height: 26px;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--muted);
+    white-space: nowrap;
+  }
+  .chip-outline {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted-foreground);
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* inline progress/duration bar used in every table row */
+  .bar {
+    position: relative;
+    flex: 1;
+    min-width: 40px;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--muted);
+    overflow: hidden;
+  }
+  .bar > span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 3px;
+  }
+
+  pre.code {
+    margin: 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--subtle);
+    padding: 9px;
+    font-size: 11px;
+    line-height: 1.55;
+    font-family: inherit;
+  }
+
+  .rowlist > * + * {
+    border-top: 1px solid var(--border);
   }
 }
 
@@ -88,6 +274,11 @@
     --chart-4: #008300;
     --chart-5: #4a3aa7;
     --chart-err: #d03b3b;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --err: #dc2626;
+    --info: #2563eb;
+    --subtle: oklch(0.985 0 0);
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-primary: oklch(0.205 0 0);
@@ -124,6 +315,11 @@
     --chart-4: #008300;
     --chart-5: #9085e9;
     --chart-err: #d03b3b;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --info: #60a5fa;
+    --subtle: oklch(0.185 0 0);
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);
@@ -140,8 +336,24 @@
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
+    font-size: 12px;
+    -webkit-font-smoothing: antialiased;
   }
   html {
     @apply font-mono;
+  }
+  input,
+  select,
+  button,
+  textarea {
+    font-family: inherit;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 6px;
   }
 }

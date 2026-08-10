@@ -51,14 +51,20 @@ public class AnalyticsController {
         return ApiResponse.ok(result);
     }
 
-    // GET /api/v1/analytics/versions?agent_id=Y — per-service.version regression
-    // comparison: latency, error rate, tokens, system metrics, judge scores.
+    // GET /api/v1/analytics/versions?agent_id=Y&date_from=Z&date_to=W —
+    // per-service.version regression comparison: latency, error rate, tokens,
+    // system metrics, judge scores.
+    // Same window semantics as /analytics: the dashboard's scope bar drives both,
+    // so a release that fell outside the window disappears from both views
+    // instead of the Versions page silently reporting all-time numbers.
     @GetMapping("/versions")
     public ApiResponse<List<com.remi.backend.dto.VersionStats>> versions(
             HttpServletRequest req,
-            @RequestParam(name = "agent_id", required = false) String agentId) {
+            @RequestParam(name = "agent_id",  required = false) String agentId,
+            @RequestParam(name = "date_from", required = false) String startDate,
+            @RequestParam(name = "date_to",   required = false) String endDate) {
         KeyContext ctx = KeyContext.of(req);
-        return ApiResponse.ok(repo.getVersionComparison(ctx.orgId(), agentId));
+        return ApiResponse.ok(repo.getVersionComparison(ctx.orgId(), agentId, startDate, endDate));
     }
 
     public record SampleJudgeRequest(String agent, String version, Integer sample) {}

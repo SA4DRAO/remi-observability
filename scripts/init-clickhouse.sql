@@ -171,6 +171,105 @@ FROM remi.otel_traces
 WHERE notEmpty(SpanAttributes['gen_ai.request.model']);
 
 -- ---------------------------------------------------------------------------
+-- otel_metrics_gauge / otel_metrics_sum
+--   Written by the OTel Collector's clickhouseexporter (metrics pipeline) —
+--   agent CPU/memory from opentelemetry-instrumentation-system-metrics.
+--
+--   Same deal as otel_traces: the column list mirrors the exporter's default so
+--   create_schema: true is a no-op, PLUS the two Remi materialized columns.
+--   Without them every org-scoped metrics query had to decompress the
+--   ResourceAttributes Map for each row — measured 234ms vs 26ms (9x) on 560k
+--   gauge rows for the version-comparison query. ClickHouseRepository reads
+--   OrgId/ServiceVersion and must never re-derive them from the map.
+--
+--   Coupling: the non-Remi columns track otelcol-contrib 0.105.0 (pinned in
+--   docker-compose.yml). If that image is bumped and the exporter adds a
+--   column, add it here too — IF NOT EXISTS means our definition wins and the
+--   exporter would otherwise fail to insert.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS remi.otel_metrics_gauge (
+    ResourceAttributes            Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    ResourceSchemaUrl             String                              CODEC(ZSTD(1)),
+    ScopeName                     String                              CODEC(ZSTD(1)),
+    ScopeVersion                  String                              CODEC(ZSTD(1)),
+    ScopeAttributes               Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    ScopeDroppedAttrCount         UInt32                              CODEC(ZSTD(1)),
+    ScopeSchemaUrl                String                              CODEC(ZSTD(1)),
+    ServiceName                   LowCardinality(String)              CODEC(ZSTD(1)),
+    MetricName                    String                              CODEC(ZSTD(1)),
+    MetricDescription             String                              CODEC(ZSTD(1)),
+    MetricUnit                    String                              CODEC(ZSTD(1)),
+    Attributes                    Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    StartTimeUnix                 DateTime64(9)                       CODEC(Delta(8), ZSTD(1)),
+    TimeUnix                      DateTime64(9)                       CODEC(Delta(8), ZSTD(1)),
+    Value                         Float64                             CODEC(ZSTD(1)),
+    Flags                         UInt32                              CODEC(ZSTD(1)),
+    `Exemplars.FilteredAttributes` Array(Map(LowCardinality(String), String)) CODEC(ZSTD(1)),
+    `Exemplars.TimeUnix`           Array(DateTime64(9))               CODEC(ZSTD(1)),
+    `Exemplars.Value`              Array(Float64)                     CODEC(ZSTD(1)),
+    `Exemplars.SpanId`             Array(String)                      CODEC(ZSTD(1)),
+    `Exemplars.TraceId`            Array(String)                      CODEC(ZSTD(1)),
+
+    -- ── Remi materialized columns (mirror otel_traces) ─────────────────────
+    OrgId          LowCardinality(String) MATERIALIZED if(notEmpty(ResourceAttributes['remi.org_id']), ResourceAttributes['remi.org_id'], ResourceAttributes['service.namespace']),
+    ServiceVersion LowCardinality(String) MATERIALIZED ResourceAttributes['service.version'],
+
+    INDEX idx_org             OrgId                         TYPE set(100)           GRANULARITY 1,
+    INDEX idx_res_attr_key    mapKeys(ResourceAttributes)   TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_res_attr_value  mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_scope_attr_key  mapKeys(ScopeAttributes)      TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_scope_attr_value mapValues(ScopeAttributes)   TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_attr_key        mapKeys(Attributes)           TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_attr_value      mapValues(Attributes)         TYPE bloom_filter(0.01) GRANULARITY 1
+)
+ENGINE = MergeTree()
+PARTITION BY toDate(TimeUnix)
+ORDER BY (ServiceName, MetricName, Attributes, toUnixTimestamp64Nano(TimeUnix))
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+CREATE TABLE IF NOT EXISTS remi.otel_metrics_sum (
+    ResourceAttributes            Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    ResourceSchemaUrl             String                              CODEC(ZSTD(1)),
+    ScopeName                     String                              CODEC(ZSTD(1)),
+    ScopeVersion                  String                              CODEC(ZSTD(1)),
+    ScopeAttributes               Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    ScopeDroppedAttrCount         UInt32                              CODEC(ZSTD(1)),
+    ScopeSchemaUrl                String                              CODEC(ZSTD(1)),
+    ServiceName                   LowCardinality(String)              CODEC(ZSTD(1)),
+    MetricName                    String                              CODEC(ZSTD(1)),
+    MetricDescription             String                              CODEC(ZSTD(1)),
+    MetricUnit                    String                              CODEC(ZSTD(1)),
+    Attributes                    Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+    StartTimeUnix                 DateTime64(9)                       CODEC(Delta(8), ZSTD(1)),
+    TimeUnix                      DateTime64(9)                       CODEC(Delta(8), ZSTD(1)),
+    Value                         Float64                             CODEC(ZSTD(1)),
+    Flags                         UInt32                              CODEC(ZSTD(1)),
+    `Exemplars.FilteredAttributes` Array(Map(LowCardinality(String), String)) CODEC(ZSTD(1)),
+    `Exemplars.TimeUnix`           Array(DateTime64(9))               CODEC(ZSTD(1)),
+    `Exemplars.Value`              Array(Float64)                     CODEC(ZSTD(1)),
+    `Exemplars.SpanId`             Array(String)                      CODEC(ZSTD(1)),
+    `Exemplars.TraceId`            Array(String)                      CODEC(ZSTD(1)),
+    AggregationTemporality        Int32                               CODEC(ZSTD(1)),
+    IsMonotonic                   Bool                                CODEC(Delta(1), ZSTD(1)),
+
+    -- ── Remi materialized columns (mirror otel_traces) ─────────────────────
+    OrgId          LowCardinality(String) MATERIALIZED if(notEmpty(ResourceAttributes['remi.org_id']), ResourceAttributes['remi.org_id'], ResourceAttributes['service.namespace']),
+    ServiceVersion LowCardinality(String) MATERIALIZED ResourceAttributes['service.version'],
+
+    INDEX idx_org             OrgId                         TYPE set(100)           GRANULARITY 1,
+    INDEX idx_res_attr_key    mapKeys(ResourceAttributes)   TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_res_attr_value  mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_scope_attr_key  mapKeys(ScopeAttributes)      TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_scope_attr_value mapValues(ScopeAttributes)   TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_attr_key        mapKeys(Attributes)           TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_attr_value      mapValues(Attributes)         TYPE bloom_filter(0.01) GRANULARITY 1
+)
+ENGINE = MergeTree()
+PARTITION BY toDate(TimeUnix)
+ORDER BY (ServiceName, MetricName, Attributes, toUnixTimestamp64Nano(TimeUnix))
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+-- ---------------------------------------------------------------------------
 -- otel_logs  —  written by the OTel Collector's clickhouseexporter (logs pipeline)
 -- Retained for optional log ingestion. With Claude Code Traces beta enabled,
 -- sessions are built from real spans (otel_traces), so there is NO logs->traces

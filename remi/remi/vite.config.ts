@@ -22,9 +22,10 @@ export default defineConfig({
     minify: "esbuild",
     rollupOptions: {
       output: {
+        // Radix is no longer a dependency (the shadcn wrappers were replaced by
+        // plain CSS classes in index.css), so only the query chunk is split.
         manualChunks: (id) => {
           if (id.includes("@tanstack/react-query")) return "query";
-          if (id.includes("@radix-ui/")) return "radix";
         },
       },
     },

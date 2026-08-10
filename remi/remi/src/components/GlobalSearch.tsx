@@ -6,7 +6,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Search, X, Loader2 } from "lucide-react";
 import { useSpanSearch } from "../hooks/useSpanSearch";
-import { Badge } from "./ui/badge";
 
 interface GlobalSearchProps {
   onSessionSelect?: (sessionId: string) => void;
@@ -68,13 +67,13 @@ export function GlobalSearch({ onSessionSelect }: GlobalSearchProps) {
     <>
       {/* Trigger button */}
       <button
-        className="flex items-center gap-2 rounded-md border border-border/60 bg-background px-3 py-1.5 text-sm text-muted-foreground shadow-sm hover:border-border hover:text-foreground transition-colors"
+        className="ctl h-7 text-muted-foreground hover:text-foreground"
         onClick={() => { setOpen(true); setTimeout(() => inputRef.current?.focus(), 50); }}
         aria-label="Search spans (Ctrl+K)"
       >
-        <Search className="h-3.5 w-3.5" />
-        <span className="hidden sm:inline">Search spans…</span>
-        <kbd className="hidden rounded bg-muted px-1 text-[10px] font-mono sm:inline">⌘K</kbd>
+        <Search className="h-3 w-3" />
+        <span className="hidden sm:inline">Search spans, prompts…</span>
+        <kbd className="hidden rounded border px-1 text-[10px] sm:inline">⌘K</kbd>
       </button>
 
       {/* Modal overlay */}
@@ -131,16 +130,13 @@ export function GlobalSearch({ onSessionSelect }: GlobalSearchProps) {
                           <span className="truncate font-mono text-xs font-medium">
                             {r.span_name}
                           </span>
-                          {r.model && (
-                            <Badge variant="secondary" className="shrink-0 font-mono text-[9px] px-1 py-0">
-                              {r.model}
-                            </Badge>
-                          )}
-                          <Badge variant="outline" className={`shrink-0 text-[9px] px-1 py-0 ${
-                            r.status === "error" ? "border-red-400 text-red-600" : "text-muted-foreground"
-                          }`}>
+                          {r.model && <span className="chip shrink-0">{r.model}</span>}
+                          <span
+                            className="chip chip-outline shrink-0"
+                            style={{ color: r.status === "error" ? "var(--err)" : undefined }}
+                          >
                             {r.status}
-                          </Badge>
+                          </span>
                         </div>
                         {r.snippet && (
                           <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">

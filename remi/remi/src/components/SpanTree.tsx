@@ -1,161 +1,127 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { Badge } from "./ui/badge";
+import { useMemo, useState } from "react";
 import type { Span } from "../types";
-import { buildSpanTree, flattenSpanTree, type SpanNode } from "../utils/span-tree";
+import { spanColor } from "../utils/format";
+import { buildSpanTree, flattenSpanTree } from "../utils/span-tree";
 
 interface SpanTreeProps {
   spans: Span[];
+  selectedSpanId?: string | null;
   onSpanClick?: (span: Span) => void;
+  /** Substring match on span name or model; non-matching rows are hidden. */
+  filter?: string;
 }
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
+function formatMs(ms: number): string {
+  return ms < 1000 ? `${ms.toFixed(0)}ms` : `${(ms / 1000).toFixed(2)}s`;
 }
 
-function spanIcon(span: Span): string {
-  if (span.kind === "llm") return "💬";
-  if (span.kind === "tool") return "🔧";
-  if (span.kind === "agent") return "🤖";
-  return "⚡";
-}
-
-function spanColorClass(span: Span): string {
-  if (span.status === "error") return "border-l-red-500";
-  if (span.kind === "llm")   return "border-l-blue-400";
-  if (span.kind === "tool")  return "border-l-purple-400";
-  if (span.kind === "agent") return "border-l-emerald-400";
-  return "border-l-slate-400";
-}
-
-function computeBarStyle(
-  span: Span,
-  minMs: number,
-  rangeMs: number
-): { left: string; width: string } {
-  if (rangeMs === 0) return { left: "0%", width: "100%" };
-  const startMs = new Date(span.started_at).getTime();
-  const leftPct = ((startMs - minMs) / rangeMs) * 100;
-  const widthPct = Math.max((span.duration_ms / rangeMs) * 100, 0.5);
-  return {
-    left: `${Math.max(0, leftPct).toFixed(2)}%`,
-    width: `${Math.min(widthPct, 100 - leftPct).toFixed(2)}%`,
-  };
-}
-
-interface SpanRowProps {
-  node: SpanNode;
-  minMs: number;
-  rangeMs: number;
-  isExpanded: boolean;
-  hasChildren: boolean;
-  onToggle: () => void;
-  onSpanClick?: (span: Span) => void;
-}
-
-function SpanRow({ node, minMs, rangeMs, isExpanded, hasChildren, onToggle, onSpanClick }: SpanRowProps) {
-  const { span, depth } = node;
-  const isError = span.status === "error";
-  const barStyle = computeBarStyle(span, minMs, rangeMs);
-
-  return (
-    <div
-      className={`group flex items-center gap-2 border-l-2 py-1.5 pr-3 hover:bg-muted/40 transition-colors cursor-pointer ${spanColorClass(span)}`}
-      style={{ paddingLeft: `${depth * 16 + 8}px` }}
-      onClick={() => onSpanClick?.(span)}
-    >
-      <button
-        className="shrink-0 text-muted-foreground"
-        onClick={(e) => { e.stopPropagation(); onToggle(); }}
-        aria-label={isExpanded ? "Collapse" : "Expand"}
-        style={{ visibility: hasChildren ? "visible" : "hidden", width: 16 }}
-      >
-        {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-      </button>
-
-      <span className="shrink-0 text-sm" aria-hidden>{spanIcon(span)}</span>
-
-      <span className="min-w-0 flex-1 truncate text-sm font-medium" title={span.name}>
-        {span.name}
-      </span>
-
-      {span.model && (
-        <Badge variant="secondary" className="shrink-0 font-mono text-[10px] px-1.5 py-0 bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-300/40">
-          {span.model}
-        </Badge>
-      )}
-
-      {isError && (
-        <Badge variant="destructive" className="shrink-0 px-1.5 py-0 text-[10px]">error</Badge>
-      )}
-
-      <div className="relative mx-2 hidden h-4 w-32 shrink-0 overflow-hidden rounded-sm bg-muted sm:block">
-        <div
-          className={`absolute top-0 h-full rounded-sm opacity-70 ${
-            isError ? "bg-red-500" : span.kind === "llm" ? "bg-blue-400" : "bg-slate-400"
-          }`}
-          style={{ left: barStyle.left, width: barStyle.width }}
-        />
-      </div>
-
-      <span className="w-16 shrink-0 text-right font-mono text-xs text-muted-foreground">
-        {formatDuration(span.duration_ms)}
-      </span>
-    </div>
-  );
-}
-
-export function SpanTree({ spans, onSpanClick }: SpanTreeProps) {
-  const roots = buildSpanTree(spans);
-  const allNodes = flattenSpanTree(roots);
+/**
+ * Hierarchy on the left, waterfall on the right — one row per span, so the
+ * shape of a trace and where its time went read from the same line.
+ */
+export function SpanTree({ spans, selectedSpanId, onSpanClick, filter = "" }: SpanTreeProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
-  if (allNodes.length === 0) {
-    return (
-      <div className="py-8 text-center text-sm text-muted-foreground">No spans available</div>
-    );
-  }
+  const nodes = useMemo(() => flattenSpanTree(buildSpanTree(spans)), [spans]);
 
-  const allMs = spans.map((s) => new Date(s.started_at).getTime());
-  const minMs  = Math.min(...allMs);
-  const maxMs  = Math.max(...spans.map((s) => new Date(s.started_at).getTime() + s.duration_ms));
-  const rangeMs = maxMs - minMs;
+  const { minMs, rangeMs } = useMemo(() => {
+    if (spans.length === 0) return { minMs: 0, rangeMs: 0 };
+    const starts = spans.map((s) => new Date(s.started_at).getTime());
+    const ends = spans.map((s) => new Date(s.started_at).getTime() + s.duration_ms);
+    const min = Math.min(...starts);
+    return { minMs: min, rangeMs: Math.max(1, Math.max(...ends) - min) };
+  }, [spans]);
 
-  // Filter out nodes whose ancestors are collapsed
-  const visibleNodes = allNodes.filter((node) => {
-    let current = node.span.parent_span_id;
-    while (current) {
-      if (collapsed.has(current)) return false;
-      const parent = allNodes.find((n) => n.span.span_id === current);
-      current = parent?.span.parent_span_id ?? null;
+  const query = filter.trim().toLowerCase();
+  const hasChildren = useMemo(
+    () => new Set(spans.map((s) => s.parent_span_id).filter(Boolean) as string[]),
+    [spans]
+  );
+
+  const visible = nodes.filter((node) => {
+    if (query) {
+      return (
+        node.span.name.toLowerCase().includes(query) ||
+        (node.span.model ?? "").toLowerCase().includes(query)
+      );
+    }
+    let parent = node.span.parent_span_id;
+    while (parent) {
+      if (collapsed.has(parent)) return false;
+      parent = nodes.find((n) => n.span.span_id === parent)?.span.parent_span_id ?? null;
     }
     return true;
   });
 
+  if (nodes.length === 0) {
+    return <p className="py-10 text-center text-[11px] text-muted-foreground">No spans available.</p>;
+  }
+  if (visible.length === 0) {
+    return <p className="py-10 text-center text-[11px] text-muted-foreground">No spans match “{filter}”.</p>;
+  }
+
   return (
-    <div className="divide-y divide-border/50">
-      {visibleNodes.map((node) => {
-        const hasChildren = node.children.length > 0;
-        const isExpanded = !collapsed.has(node.span.span_id);
+    <div>
+      {visible.map(({ span, depth }) => {
+        const selected = selectedSpanId === span.span_id;
+        const left = ((new Date(span.started_at).getTime() - minMs) / rangeMs) * 100;
+        const width = Math.max(0.6, (span.duration_ms / rangeMs) * 100);
+        const expandable = hasChildren.has(span.span_id) && !query;
+        const color = spanColor(span);
+
         return (
-          <SpanRow
-            key={node.span.span_id}
-            node={node}
-            minMs={minMs}
-            rangeMs={rangeMs}
-            isExpanded={isExpanded}
-            hasChildren={hasChildren}
-            onToggle={() => {
-              setCollapsed((prev) => {
-                const next = new Set(prev);
-                if (next.has(node.span.span_id)) next.delete(node.span.span_id);
-                else next.add(node.span.span_id);
-                return next;
-              });
+          <div
+            key={span.span_id}
+            onClick={() => onSpanClick?.(span)}
+            className="flex cursor-pointer items-center border-b hover:bg-muted"
+            style={{
+              background: selected ? "var(--muted)" : undefined,
+              boxShadow: selected ? "inset 2px 0 0 0 var(--foreground)" : undefined,
             }}
-            onSpanClick={onSpanClick}
-          />
+          >
+            <span
+              className="flex w-[300px] min-w-0 shrink-0 items-center gap-1.5 py-1.5 pr-2"
+              style={{ paddingLeft: 12 + depth * 14 }}
+            >
+              <button
+                className="w-2.5 shrink-0 text-[9px] text-muted-foreground"
+                style={{ visibility: expandable ? "visible" : "hidden" }}
+                aria-label={collapsed.has(span.span_id) ? "Expand" : "Collapse"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setCollapsed((prev) => {
+                    const next = new Set(prev);
+                    if (!next.delete(span.span_id)) next.add(span.span_id);
+                    return next;
+                  });
+                }}
+              >
+                {collapsed.has(span.span_id) ? "▸" : "▾"}
+              </button>
+              <span className="h-[5px] w-[5px] shrink-0 rounded-[1px]" style={{ background: color }} />
+              <span
+                className="truncate text-[11px]"
+                style={{ fontWeight: depth === 0 ? 700 : 500 }}
+                title={span.name}
+              >
+                {span.name}
+              </span>
+              {span.model && (
+                <span className="shrink-0 text-[9px] text-muted-foreground">{span.model}</span>
+              )}
+            </span>
+
+            <span className="relative flex h-[26px] min-w-0 flex-1 items-center">
+              <span
+                className="absolute h-[11px] rounded-[2px] opacity-85"
+                style={{ left: `${left}%`, width: `${width}%`, background: color }}
+              />
+            </span>
+
+            <span className="w-16 shrink-0 pr-6 text-right text-[11px] tabular-nums text-muted-foreground">
+              {formatMs(span.duration_ms)}
+            </span>
+          </div>
         );
       })}
     </div>

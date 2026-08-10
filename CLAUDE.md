@@ -50,6 +50,13 @@ Dashboard :3000 → Spring :3100 /api/v1/* (org resolved from bearer key)
   `ClickHouseRepository` reads the columns, never re-derives from maps. Change
   an expression → change it in init-clickhouse.sql AND `ALTER ... MODIFY COLUMN`
   + `MATERIALIZE COLUMN` on the live table.
+  `otel_metrics_gauge`/`otel_metrics_sum` carry the same treatment for `OrgId`
+  and `ServiceVersion` (+ `idx_org`) — added 2026-08-09, because every
+  org-scoped metrics query was decompressing `ResourceAttributes` per row
+  (measured 234ms → 26ms on 560k gauge rows for the version comparison). Both
+  tables are now defined in init-clickhouse.sql rather than left to the
+  collector's `create_schema`, so their non-Remi columns track the **pinned**
+  otelcol-contrib 0.105.0 — bump that image and the column lists must follow.
 - **Session identity** (the `SessionId` column's rungs, in order):
   `remi.session_id` → `gen_ai.conversation.id` (LangGraph stamps it on the
   invoke_agent ROOT span from `configurable.thread_id`) →
@@ -89,6 +96,12 @@ Dashboard :3000 → Spring :3100 /api/v1/* (org resolved from bearer key)
   tokens, avg CPU / peak RSS from the metrics tables, judge scores joined from
   `remi_span_analysis`. Agents set the version via
   `OTEL_RESOURCE_ATTRIBUTES=service.version=X`.
+  Accepts `date_from`/`date_to` like `/analytics`, and the dashboard's scope bar
+  passes them — the rollup, the judge join, and the metrics join must all share
+  one window or a filtered-out release still contributes verdicts/CPU to a row
+  that no longer exists. (Before 2026-08-09 this endpoint was all-time while
+  every view around it was windowed, so the overview's regression alerts and
+  agent-table p95 were dated inconsistently with their own headers.)
   `POST /api/v1/analytics/versions/sample-judge {agent, version, sample}` judges
   up to 5 random unjudged LLM spans of that agent-version so its quality columns
   fill in. UI: `VersionComparison.tsx` — one section per agent with its own

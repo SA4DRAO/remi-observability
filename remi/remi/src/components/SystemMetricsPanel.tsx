@@ -1,14 +1,6 @@
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useSystemMetrics } from "../hooks/useSystemMetrics";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { AXIS_TICK, GRID, TOOLTIP_STYLE } from "../lib/chart";
 import { Skeleton } from "./ui/skeleton";
 import type { SystemMetricSeries } from "../types";
 
@@ -18,23 +10,15 @@ import type { SystemMetricSeries } from "../types";
 // process-level metrics describe the agent itself.
 const CHARTED: Array<{ match: (name: string) => boolean; title: string; unit: "percent" | "bytes" }> = [
   { match: (n) => n.startsWith("process.cpu.utilization") || n.startsWith("process.runtime.cpython.cpu.utilization"), title: "Process CPU", unit: "percent" },
-  { match: (n) => n.startsWith("process.memory.usage") || n.startsWith("process.runtime.cpython.memory (rss)"), title: "Process Memory (RSS)", unit: "bytes" },
-  { match: (n) => n.startsWith("process.memory.virtual"), title: "Process Memory (virtual)", unit: "bytes" },
-  { match: (n) => n.startsWith("system.memory.utilization (used)"), title: "System Memory (used)", unit: "percent" },
+  { match: (n) => n.startsWith("process.memory.usage") || n.startsWith("process.runtime.cpython.memory (rss)"), title: "Memory RSS", unit: "bytes" },
+  { match: (n) => n.startsWith("process.memory.virtual"), title: "Memory virtual", unit: "bytes" },
+  { match: (n) => n.startsWith("system.memory.utilization (used)"), title: "System memory used", unit: "percent" },
 ];
-
-const TOOLTIP_STYLE: React.CSSProperties = {
-  background: "var(--popover)",
-  color: "var(--popover-foreground)",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  fontSize: 12,
-};
 
 function formatValue(v: number, unit: "percent" | "bytes"): string {
   if (unit === "percent") return `${(v * 100).toFixed(1)}%`;
   if (v >= 1 << 30) return `${(v / (1 << 30)).toFixed(2)} GiB`;
-  if (v >= 1 << 20) return `${(v / (1 << 20)).toFixed(1)} MiB`;
+  if (v >= 1 << 20) return `${(v / (1 << 20)).toFixed(0)} MiB`;
   return `${Math.round(v / 1024)} KiB`;
 }
 
@@ -42,25 +26,36 @@ function timeLabel(ts: string): string {
   return new Date(ts).toLocaleTimeString(undefined, { hour12: false });
 }
 
-function MetricChart({ series, title, unit }: { series: SystemMetricSeries; title: string; unit: "percent" | "bytes" }) {
-  const data = series.points.map((p) => ({ ts: p.ts, value: p.value }));
+function MetricChart({
+  series,
+  title,
+  unit,
+  color,
+}: {
+  series: SystemMetricSeries;
+  title: string;
+  unit: "percent" | "bytes";
+  color: string;
+}) {
+  const peak = Math.max(...series.points.map((p) => p.value));
   return (
     <div>
-      <p className="mb-1 text-xs font-medium text-muted-foreground">{title}</p>
-      <div className="h-36">
+      <div className="mb-1.5 flex items-baseline gap-2">
+        <span className="kicker">{title}</span>
+        <span className="ml-auto text-[11px] tabular-nums">peak {formatValue(peak, unit)}</span>
+      </div>
+      <div className="h-24 rounded-md border p-1.5">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 4, right: 8, left: -8, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-            <XAxis dataKey="ts" tickFormatter={timeLabel}
-              tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} tickLine={false}
-              axisLine={{ stroke: "var(--border)" }} minTickGap={40} />
-            <YAxis tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} tickLine={false} axisLine={false}
-              tickFormatter={(v: number) => formatValue(v, unit)} width={70} />
-            <Tooltip contentStyle={TOOLTIP_STYLE}
+          <AreaChart data={series.points} margin={{ top: 2, right: 2, left: -28, bottom: -8 }}>
+            <CartesianGrid {...GRID} />
+            <XAxis dataKey="ts" tickFormatter={timeLabel} tick={AXIS_TICK} tickLine={false} axisLine={false} minTickGap={44} />
+            <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} tickFormatter={(v: number) => formatValue(v, unit)} width={58} />
+            <Tooltip
+              contentStyle={TOOLTIP_STYLE}
               labelFormatter={(l) => timeLabel(String(l))}
-              formatter={(value) => [formatValue(Number(value), unit), title]} />
-            <Area type="monotone" dataKey="value" stroke="var(--chart-1)" strokeWidth={2}
-              fill="var(--chart-1)" fillOpacity={0.12} />
+              formatter={(value) => [formatValue(Number(value), unit), title]}
+            />
+            <Area type="monotone" dataKey="value" stroke={color} strokeWidth={1.5} fill={color} fillOpacity={0.12} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -68,39 +63,39 @@ function MetricChart({ series, title, unit }: { series: SystemMetricSeries; titl
   );
 }
 
+const COLORS = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-5)"];
+
 export function SystemMetricsPanel({ sessionId }: { sessionId: string }) {
   const { metrics, isPending } = useSystemMetrics(sessionId);
 
-  const charts = CHARTED
-    .map((c) => {
-      const series = metrics.find((m) => c.match(m.name));
-      return series && series.points.length > 0 ? { ...c, series } : null;
-    })
-    .filter((c): c is NonNullable<typeof c> => c !== null);
+  const charts = CHARTED.flatMap((c) => {
+    const series = metrics.find((m) => c.match(m.name));
+    return series && series.points.length > 0 ? [{ ...c, series }] : [];
+  });
 
-  if (!isPending && charts.length === 0) return null; // agent didn't export system metrics
+  if (isPending) {
+    return (
+      <div className="flex flex-col gap-4 p-4">
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-24 w-full" />
+      </div>
+    );
+  }
+
+  if (charts.length === 0) {
+    return (
+      <p className="text-pretty p-4 text-[11px] text-muted-foreground">
+        This agent exported no process metrics. Launch it with
+        {" "}<code>opentelemetry-instrument</code> and the system-metrics instrumentation installed.
+      </p>
+    );
+  }
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">System Metrics</CardTitle>
-        <CardDescription>
-          CPU and memory of the agent process during this session (OTLP metrics)
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {isPending ? (
-          <div className="grid gap-4 sm:grid-cols-2">
-            {Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} className="h-36 w-full" />)}
-          </div>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2">
-            {charts.map((c) => (
-              <MetricChart key={c.title} series={c.series} title={c.title} unit={c.unit} />
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <div className="flex flex-col gap-4 p-4">
+      {charts.map((c, i) => (
+        <MetricChart key={c.title} series={c.series} title={c.title} unit={c.unit} color={COLORS[i % COLORS.length]} />
+      ))}
+    </div>
   );
 }

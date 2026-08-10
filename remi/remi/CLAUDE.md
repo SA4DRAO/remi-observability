@@ -12,15 +12,19 @@ bun run type-check   # tsc --noEmit
 bun run lint
 bun run lint:fix
 bun run format       # prettier --write
+bun run format:check # prettier --check (CI-safe)
 bun run build        # Vite production build → dist/
-bun run preview      # serve dist/ locally
+bun run preview      # serve dist/ locally (http://localhost:4173)
 
-# Container build (Podman)
+# Standalone container build. The normal path is `docker compose build frontend`
+# from the repo root, which passes the VITE_* build args; these two do not.
 bun run container:build
 bun run container:run
 ```
 
-There are no automated tests in this package.
+`bun test` runs the one test file in this package (`src/utils/attention.test.ts`,
+covering the overview's "needs attention" thresholds). There is no browser-level
+test setup — everything else is verified against the live stack.
 
 ## Environment Variables
 
@@ -53,27 +57,73 @@ Hooks:
 - `useSpanSearch` — full-text search over span prompts/completions (Cmd/Ctrl+K)
 - `useSpanAnalysis` — LLM-as-judge verdict for a span (`POST /sessions/:id/analyze-span`)
 - `useSystemMetrics` — per-session CPU/memory time series
-- `useAnalytics` — cross-session rollup; also exports `useVersionComparison` and `useSampleJudge` for the per-agent version view
+- `useAnalytics` — cross-session rollup; also exports `useVersionComparison` and `useSampleJudge` for the per-agent version view.
+  `useVersionComparison(agentId, dateFrom)` takes the **same window** as `useAnalytics` — the overview renders the two
+  feeds side by side (regression alerts, the agent table's p95 column), so an unscoped version query date-mismatches
+  every row it lands next to. Pass `dateFrom(scope.days)` at every call site.
 - `useTheme` — light/dark toggle
 
 ### Pages and Routing
 
-Routing is handled directly in `src/App.tsx` (no router library — an `activePage` state var plus a `selectedSessionId` override). Page components in `src/components/Pages/`:
-- `SessionsPage` — main list view with filters and quick stats
-- `SessionDetailPage` — session metadata, span views (Tree / Flame / Replay toggle), `SystemMetricsPanel`, runtime-environment card, model/tool usage tables
-- `AnalyticsPage` — totals, recharts time series (sessions/latency/tokens per day), model + agent breakdowns, and the embedded `VersionComparison` section
+Routing is handled directly in `src/App.tsx` (no router library — a `page` state var
+plus a `sessionId` that switches the shell into the trace layout). Page components
+live in `src/components/Pages/`:
+- `OverviewPage` — headline KPI strip, throughput chart, "needs attention" list, agent health table, latest runs
+- `SessionsPage` — dense session table with CSV export and pagination
+- `TracePage` — full-height split: span views on the left, `SpanInspector` rail (400px) on the right
+- `AnalyticsPage` — totals strip, latency/token charts, model table, daily values behind a `<details>`
+- `VersionComparison` — the Versions page: one section per agent, its own baseline radio
+
+**Scope is global.** `ScopeBar` (agent / time range / status) sits under the header on
+every page except the trace view. The selection lives in `App` as a `Scope`
+(`src/lib/scope.ts`) and is passed to each page, which turns it into query params —
+so the filter row is not decoration, it drives every request. `dateFrom(days)` is the
+single place a range becomes a `date_from`.
 
 ### Span Views
 
-Spans are the core unit (the old event-based renderers are gone). Four views:
-- `SpanTree.tsx` — collapsible hierarchy via `buildSpanTree`/`flattenSpanTree` (`utils/span-tree.ts`), inline mini-bar per row
-- `FlameChart.tsx` — custom lane-packing timeline, no external gantt lib
-- `SessionReplay.tsx` — step-through single-span viewer with prompt/completion + Analyze trigger
-- `SpanDetailPanel.tsx` — slide-over with attributes, prompt/completion extraction across OTel naming variants (`gen_ai.*`, `llm.*`, `traceloop.*`), and the AI-analysis (judge) section
+Spans are the core unit (the old event-based renderers are gone). The trace page
+picks one of three left-pane views, all of which write into the same selected-span
+state that the inspector reads:
+- `SpanTree.tsx` — default. Hierarchy on the left, waterfall bar on the right, one row per span
+- `FlameChart.tsx` — lane-packed timeline showing concurrency, no external gantt lib
+- `SessionReplay.tsx` — prev/next stepper plus a proportional ribbon; content is rendered by the inspector, not here
 
-### UI Components
+`SpanInspector.tsx` is the right rail (it replaced the old `SpanDetailPanel`
+slide-over) with four tabs:
+- **Span** — prompt/response extracted across OTel naming variants (`gen_ai.*`, `llm.*`, `traceloop.*`), attributes, and the "run LLM judge" trigger
+- **Session** — models, tools, runtime resource attributes
+- **System** — `SystemMetricsPanel` CPU/memory charts
+- **Judge** — the verdict: summary, scores, flags, time breakdown, suggestions
 
-`src/components/ui/` contains **shadcn/ui** wrappers over Radix UI primitives styled with Tailwind CSS v4. Add new primitives via the `shadcn` CLI (`bunx shadcn add <component>`). Do not modify the generated ui/ files directly unless fixing a bug; prefer wrapping them.
+The selected span is *derived*, not stored: `TracePage` keeps a `pickedSpanId` and
+falls back to the slowest LLM span, so a trace opens on the row you'd have clicked.
+
+### Design System
+
+The dashboard is a **data console**: 12px base, JetBrains Mono throughout, 10px
+uppercase tracked labels, tabular numerals, 28px control height, 1440px shell.
+
+The shared surfaces live as plain CSS classes in `src/index.css` under
+`@layer components` — `.panel`, `.dtable` (+ `.num` / `.dim`), `.ctl` / `.ctl-sm`,
+`.seg`, `.chip`, `.kicker`, `.sect-title`, `.bar`, `.dot`, `pre.code`, `.shell`.
+**Reach for these before writing utility strings**; a new table or control that
+hand-rolls padding and border colors will drift from everything else.
+
+Semantic color tokens (`--ok`, `--warn`, `--err`, `--info`, `--subtle`) are defined
+per theme alongside the shadcn tokens and registered in `@theme inline`, so both
+`var(--err)` and `text-err` work. Charts read `--chart-1/2/5` and `--chart-err`;
+shared recharts config is in `src/lib/chart.ts`. Status/kind → color goes through
+`spanColor()` / `statusColor()` in `utils/format.ts` so a span is the same color in
+every view. Deltas always carry an arrow and a number — color is never the only signal.
+
+`src/components/ui/` is down to `skeleton.tsx`; the rest of the shadcn/Radix wrappers
+were replaced by the classes above, and `@radix-ui/*` is no longer a dependency.
+Add primitives back with `bunx shadcn add <component>` (the `shadcn` CLI is a
+devDependency and `components.json` is still configured) only when a real
+interaction — focus trap, listbox, portal — needs one, not for static styling.
+Re-adding one pulls Radix back in; if the bundle grows enough to care, restore the
+`radix` chunk in `vite.config.ts` that was dropped when the wrappers went.
 
 ### Logging
 

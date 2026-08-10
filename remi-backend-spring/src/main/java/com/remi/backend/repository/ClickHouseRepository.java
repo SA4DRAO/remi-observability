@@ -290,25 +290,28 @@ public class ClickHouseRepository {
                 .addValue("from", fromIso)
                 .addValue("to", toIso);
 
-        String orgFilter =
-                "(ResourceAttributes['remi.org_id'] = :org_id OR ResourceAttributes['service.namespace'] = :org_id)";
-
+        // Org/service/time are filtered inside each UNION branch so only surviving
+        // rows are merged, and OrgId is the MATERIALIZED column (see
+        // init-clickhouse.sql) — never the ResourceAttributes map, which carries
+        // every resource attribute and costs ~9x to decompress per row.
         String query = """
                 SELECT MetricName, Attributes['state'] AS state, TimeUnix, Value
                 FROM (
-                    SELECT MetricName, Attributes, TimeUnix, Value, ResourceAttributes, ServiceName
+                    SELECT MetricName, Attributes, TimeUnix, Value
                     FROM otel_metrics_gauge
+                    WHERE OrgId = :org_id AND ServiceName = :service
+                      AND TimeUnix >= parseDateTime64BestEffort(:from)
+                      AND TimeUnix <= parseDateTime64BestEffort(:to)
                     UNION ALL
-                    SELECT MetricName, Attributes, TimeUnix, Value, ResourceAttributes, ServiceName
+                    SELECT MetricName, Attributes, TimeUnix, Value
                     FROM otel_metrics_sum
+                    WHERE OrgId = :org_id AND ServiceName = :service
+                      AND TimeUnix >= parseDateTime64BestEffort(:from)
+                      AND TimeUnix <= parseDateTime64BestEffort(:to)
                 )
-                WHERE %s
-                  AND ServiceName = :service
-                  AND TimeUnix >= parseDateTime64BestEffort(:from)
-                  AND TimeUnix <= parseDateTime64BestEffort(:to)
                 ORDER BY MetricName, TimeUnix ASC
                 LIMIT 20000
-                """.formatted(orgFilter);
+                """;
 
         return jdbc.query(query, params, (rs, i) -> new MetricPoint(
                 rs.getString("MetricName"),
@@ -450,9 +453,28 @@ public class ClickHouseRepository {
 
     // ── Version comparison (service.version regression view) ───────────────────
 
-    public List<VersionStats> getVersionComparison(String orgId, String agentId) {
+    public List<VersionStats> getVersionComparison(
+            String orgId, String agentId, String startDate, String endDate) {
         var params = new MapSqlParameterSource();
-        String where = "WHERE " + buildScopeWhere(params, orgId, agentId, null, null);
+        String where = "WHERE " + buildScopeWhere(params, orgId, agentId, startDate, endDate);
+
+        // The judge and system-metrics side queries are keyed by (agent, version)
+        // and must cover exactly the same window as the trace rollup above —
+        // otherwise a release filtered out of the main query still contributes
+        // verdicts or CPU numbers to a row that no longer exists.
+        var sideParams = new MapSqlParameterSource().addValue("org_id", orgId);
+        String traceWindow = "";
+        String metricWindow = "";
+        if (startDate != null && !startDate.isEmpty()) {
+            traceWindow  += " AND toDate(Timestamp) >= :start_date";
+            metricWindow += " AND toDate(TimeUnix) >= :start_date";
+            sideParams.addValue("start_date", startDate);
+        }
+        if (endDate != null && !endDate.isEmpty()) {
+            traceWindow  += " AND toDate(Timestamp) <= :end_date";
+            metricWindow += " AND toDate(TimeUnix) <= :end_date";
+            sideParams.addValue("end_date", endDate);
+        }
 
         // Keyed by (agent, version): a release comparison is only meaningful
         // within one agent, and two agents sharing a version string must not merge.
@@ -491,34 +513,41 @@ public class ClickHouseRepository {
                 INNER JOIN (
                     SELECT DISTINCT SpanId, ServiceName AS agent, %s AS version
                     FROM otel_traces
-                    WHERE OrgId = :org_id
+                    WHERE OrgId = :org_id%s
                 ) AS t ON a.span_id = t.SpanId
                 WHERE a.org_id = :org_id
                 GROUP BY agent, version
-                """.formatted(VERSION_EXPR),
-                new MapSqlParameterSource("org_id", orgId));
+                """.formatted(VERSION_EXPR, traceWindow),
+                sideParams);
 
         // System metrics per (agent, version): CPU utilization (gauge) and peak
         // RSS (sum table — the SDK exports process.memory.usage as a
         // cumulative-style sum). Resource regressions between releases show here.
+        // Filters live inside each UNION branch and read the MATERIALIZED
+        // OrgId/ServiceVersion columns, not ResourceAttributes: decompressing
+        // that Map per row measured 234ms vs 26ms on 560k gauge rows.
+        String metricsScan = """
+                SELECT MetricName, Value, ServiceVersion, ServiceName FROM %s
+                WHERE OrgId = :org_id
+                  AND MetricName IN ('process.cpu.utilization', 'process.memory.usage')%s""";
+
         List<Map<String, Object>> sysRows = jdbc.queryForList("""
                 SELECT
                     ServiceName                                                                     AS agent,
-                    if(notEmpty(ResourceAttributes['service.version']),
-                       ResourceAttributes['service.version'], 'unversioned')                        AS version,
+                    %s                                                                              AS version,
                     round(avgIf(Value, MetricName = 'process.cpu.utilization') * 100, 2)            AS avg_cpu_pct,
                     maxIf(Value, MetricName = 'process.memory.usage')                               AS max_rss_bytes
                 FROM (
-                    SELECT MetricName, Value, ResourceAttributes, ServiceName FROM otel_metrics_gauge
+                    %s
                     UNION ALL
-                    SELECT MetricName, Value, ResourceAttributes, ServiceName FROM otel_metrics_sum
+                    %s
                 )
-                WHERE (ResourceAttributes['remi.org_id'] = :org_id
-                       OR ResourceAttributes['service.namespace'] = :org_id)
-                  AND MetricName IN ('process.cpu.utilization', 'process.memory.usage')
                 GROUP BY agent, version
-                """,
-                new MapSqlParameterSource("org_id", orgId));
+                """.formatted(
+                        VERSION_EXPR,
+                        metricsScan.formatted("otel_metrics_gauge", metricWindow),
+                        metricsScan.formatted("otel_metrics_sum", metricWindow)),
+                sideParams);
 
         Map<String, Map<String, Object>> judgeByKey = new HashMap<>();
         for (var r : judgeRows) judgeByKey.put(r.get("agent") + "\0" + r.get("version"), r);

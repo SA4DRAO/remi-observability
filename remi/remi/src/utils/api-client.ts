@@ -4,6 +4,7 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig, type InternalAxiosRequestConfig, type AxiosResponse, type AxiosError } from "axios";
 import { config } from "../config/env";
 import { logger } from "./logger";
+import { DEMO_MODE, demoRequest } from "./demo-data";
 
 class ApiClient {
   private client: AxiosInstance;
@@ -77,12 +78,20 @@ class ApiClient {
     );
   }
 
+  // Demo mode short-circuits here rather than in each hook, so every caller —
+  // hooks, pages, components — is unaware there is no backend.
   async get<T>(endpoint: string, configOverrides?: AxiosRequestConfig): Promise<T> {
+    if (DEMO_MODE) {
+      return (await demoRequest("get", endpoint, configOverrides?.params ?? {})) as T;
+    }
     const res = await this.client.get<T>(endpoint, configOverrides);
     return res.data;
   }
 
   async post<T>(endpoint: string, data?: unknown, configOverrides?: AxiosRequestConfig): Promise<T> {
+    if (DEMO_MODE) {
+      return (await demoRequest("post", endpoint, configOverrides?.params ?? {}, data)) as T;
+    }
     const res = await this.client.post<T>(endpoint, data, configOverrides);
     return res.data;
   }

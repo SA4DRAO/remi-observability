@@ -1,0 +1,12 @@
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
+  "installCommand": "bun install",
+  "buildCommand": "VITE_DEMO_MODE=true VITE_ENABLE_DEBUG=false bun run build",
+  "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/demo-data.json",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=300, must-revalidate" }]
+    }
+  ]
+}

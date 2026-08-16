@@ -24,6 +24,13 @@ remi:
     username: ${POSTGRES_USER:remi_user}
     password: ${POSTGRES_PASSWORD:remi_password}
   collector-endpoint: ${COLLECTOR_ENDPOINT:http://otel-collector:4318}
+  # Shared secret proving a request arrived through the SSO reverse proxy, which is
+  # what lets ApiKeyFilter trust X-Forwarded-Email. Unset (the dev default) disables
+  # proxy-user auth entirely, so a bare backend never accepts a forged email.
+  proxy-secret: ${PROXY_SHARED_SECRET:}
+  # Requests per org per minute across read + ingest; 0 disables. Crash protection
+  # against one tenant's runaway exporter, not a billing quota.
+  rate-limit-per-minute: ${RATE_LIMIT_PER_MINUTE:600}
   judge:
     # Provider pairing is resolved in JudgeService: OpenRouter when its key is
     # set, else direct OpenAI (base URL + model prefix adjusted accordingly).

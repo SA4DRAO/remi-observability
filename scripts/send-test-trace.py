@@ -109,9 +109,12 @@ def main():
     }
 
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        ENDPOINT, data=data, headers={"Content-Type": "application/json"}
-    )
+    headers = {"Content-Type": "application/json"}
+    # Set REMI_INGEST_KEY to exercise the backend's authenticated proxy
+    # (OTLP_ENDPOINT=http://localhost:3100) instead of the collector directly.
+    if os.environ.get("REMI_INGEST_KEY"):
+        headers["Authorization"] = f"Bearer {os.environ['REMI_INGEST_KEY']}"
+    req = urllib.request.Request(ENDPOINT, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=10) as resp:
         body = resp.read().decode()
         print(f"POST {ENDPOINT} -> {resp.status}")

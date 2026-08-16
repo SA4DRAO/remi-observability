@@ -1,0 +1,45 @@
+{$REMI_DOMAIN} {
+	# Trust boundary. These headers are how the backend identifies a signed-in user,
+	# so a client must never be able to supply them — strip before anything else runs.
+	request_header -X-Forwarded-Email
+	request_header -X-Auth-Request-Email
+	request_header -X-Remi-Proxy-Secret
+
+	# Agent OTLP ingest: authenticated by the org's API key at the backend, not by
+	# SSO. Agents have no browser and must not be redirected to a login page.
+	handle /v1/* {
+		reverse_proxy backend:3100
+	}
+
+	handle /api/v1/health {
+		reverse_proxy backend:3100
+	}
+
+	# oauth2-proxy's own endpoints (callback, sign-in) must stay reachable signed-out.
+	handle /oauth2/* {
+		reverse_proxy oauth2-proxy:4180
+	}
+
+	# Everything below requires a signed-in user.
+	handle {
+		forward_auth oauth2-proxy:4180 {
+			uri /oauth2/auth
+			copy_headers X-Auth-Request-Email>X-Forwarded-Email
+
+			@needs-login status 401
+			handle_response @needs-login {
+				redir * /oauth2/start?rd={scheme}://{host}{uri}
+			}
+		}
+
+		handle /api/* {
+			reverse_proxy backend:3100 {
+				header_up X-Remi-Proxy-Secret {$PROXY_SHARED_SECRET}
+			}
+		}
+
+		handle {
+			reverse_proxy frontend:3000
+		}
+	}
+}

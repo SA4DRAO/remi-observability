@@ -3,6 +3,7 @@ package com.remi.backend.controller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -20,6 +21,12 @@ public class GlobalErrorHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleGeneric(Exception ex) {
+        // Spring signals unknown paths, wrong methods and unsupported media types with
+        // exceptions that already carry the right status (ErrorResponse). Honour it —
+        // otherwise a 404 is reported as a 500, and every scanner hit looks like a bug.
+        if (ex instanceof ErrorResponse er) {
+            return ResponseEntity.status(er.getStatusCode()).body(errorBody(ex));
+        }
         log.error("Unhandled error", ex);
         return ResponseEntity.internalServerError().body(errorBody(ex));
     }

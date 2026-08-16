@@ -7,6 +7,9 @@ __pycache__/
 # Environment secrets
 .env
 
+# Database dumps — contain api_keys hashes and the audit chain
+backups/
+
 # IDE
 .vscode/
 .idea/
@@ -20,10 +23,6 @@ node_modules
 
 # Example virtualenvs
 examples/venv/
-
-# Root-level package files (not part of any sub-package)
-package.json
-package-lock.json
 
 # Marketing site (separate repo)
 remi-marketing/

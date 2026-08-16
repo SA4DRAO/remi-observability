@@ -117,6 +117,93 @@ Without it, each trace is its own session.
 | Agent runs but nothing appears | You ran `python agent.py` instead of `opentelemetry-instrument python agent.py`. |
 | Spans appear, session says "running" | Normal until the root span closes; multi-turn threads read complete between turns. |
 
+### Let an AI agent do the setup
+
+Everything above is env vars and a launcher change, which is exactly the kind of
+work a coding agent is good at. Copy the prompt below into Cursor, Claude Code,
+or any coding agent **from inside your own agent's repo** — it will bring up the
+stack and wire your agent into it.
+
+````text
+Set up Remi (self-hosted LLM observability) and point my agent at it.
+
+Remi ingests OpenTelemetry traces. Do NOT add any SDK imports, callback handlers,
+or TracerProvider code to my agent — instrumentation is env vars plus a launcher,
+nothing else. If you find yourself editing my agent's Python to add telemetry, stop:
+that is the wrong approach for this tool.
+
+PART 1 — run the stack (in a separate directory, not my repo)
+
+    git clone https://github.com/SA4DRAO/remi-observability.git
+    cd remi-observability
+    cp .env.example .env
+    docker compose up -d --build     # first build takes a few minutes
+
+Verify before continuing:
+  - curl http://localhost:3100/api/v1/health   → {"status":"ok",...}
+  - docker compose ps                          → every service Up
+  - dashboard loads at http://localhost:3000
+
+Notes:
+  - .env accepts OPENROUTER_API_KEY or OPENAI_API_KEY. Needed ONLY for the
+    LLM-as-judge feature and the bundled examples. Tracing works without one.
+  - The demo-feeder service continuously runs demo agents against a demo org
+    using that key. `docker compose stop demo-feeder` turns it off; nothing
+    else is affected.
+
+PART 2 — instrument my agent (this is the part in my repo)
+
+Find my agent's entrypoint and every place that launches it, then:
+
+1. Install the instrumentation:
+       pip install opentelemetry-distro opentelemetry-instrumentation-langchain
+       opentelemetry-bootstrap -a install
+
+2. Set these env vars wherever my project already keeps config (.env, shell
+   script, Dockerfile, process manager — match what I already use):
+
+       OTEL_SERVICE_NAME="<the name my agent should appear under>"
+       OTEL_TRACES_EXPORTER=otlp
+       OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+       OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:3100"
+       OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer acme-ingest-key"
+       OTEL_EXPERIMENTAL_RESOURCE_DETECTORS="os,process,host"
+       OTEL_RESOURCE_ATTRIBUTES="service.version=1.0.0"
+
+3. Change the launch command from:
+       python my_agent.py
+   to:
+       opentelemetry-instrument python my_agent.py
+   Update EVERY launcher: Makefile, Dockerfile CMD/ENTRYPOINT, docker-compose,
+   CI workflow, run scripts, and the README.
+
+Rules that will bite you if ignored:
+  - Export to port 3100 (Remi's authenticated proxy), never 4318. The collector
+    is bound to loopback and will refuse the connection.
+  - acme-ingest-key is the seeded local dev key — correct for localhost, rotate
+    before any real deployment.
+  - Plain `python my_agent.py` still runs fine but exports nothing. The
+    `opentelemetry-instrument` launcher is what turns instrumentation on.
+  - If Remi runs on another host, replace localhost in the endpoint accordingly.
+
+PART 3 — optional: group multi-step runs into one session
+
+If my agent is LangChain/LangGraph and makes several model calls per logical run,
+pass a stable thread id so they group into a single Remi session:
+
+    agent.invoke({"messages": [...]}, config={"configurable": {"thread_id": "run-123"}})
+
+This is the ONLY line that may touch my agent code, and it is optional. Without
+it, each trace becomes its own session.
+
+FINALLY
+
+Run my agent once, then confirm the session appears at http://localhost:3000.
+If it does not, check in this order: was it launched via opentelemetry-instrument,
+is the endpoint :3100 (not :4318), and did the exporter log a 401 (wrong key)?
+Report back what you changed and whether the session showed up.
+````
+
 ## 4. What to look at
 
 | Page | What it shows |

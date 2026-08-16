@@ -10,6 +10,9 @@ __pycache__/
 # Database dumps — contain api_keys hashes and the audit chain
 backups/
 
+# Audit chain-head ledger — per-deployment evidence, not source
+anchors/
+
 # IDE
 .vscode/
 .idea/

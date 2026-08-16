@@ -109,6 +109,16 @@ Dashboard :3000 → Spring :3100 /api/v1/* (org resolved from bearer key)
   advisory-lock serialized inserts); `GET /api/v1/admin/audit-log/verify`
   recomputes it. The hash-input string is duplicated between the INSERT and the
   verify query in `IdentityRepository` — change one, change both.
+  `/verify` only catches rows edited *without* rehashing; anyone with Postgres
+  write access can drop the immutability triggers, rewrite history, and relink
+  the whole chain so it verifies clean. `scripts/anchor-audit.sh` closes that by
+  recording each org's `(head_id, head_hash, entry_count)` to `anchors/` and
+  POSTing it to `AUDIT_ANCHOR_WEBHOOK`; a rewritten chain then contradicts a
+  head recorded off-box. The entry count is not redundant — deleting a row below
+  the head leaves every surviving hash valid. Cron it before the backup:
+  `0 3 * * * cd /path/to/Remi && ./scripts/anchor-audit.sh >> anchors/anchor.log 2>&1`
+  (exit 2 = tampering). Without a webhook the ledger sits on the same box as the
+  database and only raises the cost of tampering.
 - **Version comparison**: `GET /api/v1/analytics/versions` groups by
   **(agent, version)** — releases are only comparable within one agent, and two
   agents sharing a version string must not merge. Per row: latency, errors,
@@ -170,6 +180,8 @@ docker compose build backend
 ```bash
 PROXY_SHARED_SECRET=<secret> MEMBER_EMAIL=<seeded org_members email> ./scripts/check-auth.sh
 ./scripts/backup-db.sh                                 # pg_dump, verify it restores, prune
+./scripts/anchor-audit.sh                              # record + check each org's audit chain head
+./scripts/anchor-audit.sh --self-test                  # tamper a scratch copy, assert it's caught
 ```
 `check-auth.sh` hits the backend directly on :3100 rather than through Caddy — the
 point is that the backend rejects a forged `X-Forwarded-Email` itself, not merely

@@ -119,16 +119,16 @@ public class IdentityRepository {
 
     // ── Orgs ────────────────────────────────────────────────────────────────────
 
-    public List<Map<String, Object>> listOrgs() {
-        return jdbc.queryForList("SELECT org_id, name, plan, created_at FROM orgs ORDER BY created_at", Map.of());
-    }
-
-    public void createOrg(String orgId, String name, String plan) {
-        jdbc.update("""
-                INSERT INTO orgs (org_id, name, plan) VALUES (:id, :name, :plan)
-                ON CONFLICT (org_id) DO NOTHING
-                """,
-                new MapSqlParameterSource().addValue("id", orgId).addValue("name", name).addValue("plan", plan));
+    /**
+     * Dashboard identity: the auth proxy has already verified the email via SSO,
+     * so membership in this table is the whole authorization decision.
+     */
+    public Optional<ApiKeyRecord> findByEmail(String email) {
+        List<ApiKeyRecord> rows = jdbc.query(
+                "SELECT org_id, scopes FROM org_members WHERE email = lower(:email)",
+                new MapSqlParameterSource("email", email.trim()),
+                (rs, i) -> new ApiKeyRecord("user:" + email.trim().toLowerCase(), rs.getString("org_id"), scopesOf(rs)));
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
     // ── PII policy ──────────────────────────────────────────────────────────────

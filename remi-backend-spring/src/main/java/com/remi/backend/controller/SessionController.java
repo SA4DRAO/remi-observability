@@ -14,10 +14,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1/sessions")
@@ -95,18 +96,18 @@ public class SessionController {
             return ResponseEntity.ok(ApiResponse.ok(Map.of("metrics", List.of())));
         }
         // Pad the window: the periodic exporter flushes on its own clock.
-        var from = java.time.Instant.parse(session.startedAt()).minusSeconds(30).toString();
-        var to = java.time.Instant.parse(
+        var from = Instant.parse(session.startedAt()).minusSeconds(30).toString();
+        var to = Instant.parse(
                 session.endedAt() != null ? session.endedAt() : session.startedAt())
                 .plusSeconds(30).toString();
 
         var points = repo.getSystemMetrics(ctx.orgId(), session.agentId(), from, to);
 
         // Group into series: one per metric name (+ state dimension when present).
-        Map<String, List<Map<String, Object>>> series = new java.util.LinkedHashMap<>();
+        Map<String, List<Map<String, Object>>> series = new LinkedHashMap<>();
         for (var p : points) {
             String key = p.state().isEmpty() ? p.metric() : p.metric() + " (" + p.state() + ")";
-            series.computeIfAbsent(key, k -> new java.util.ArrayList<>())
+            series.computeIfAbsent(key, k -> new ArrayList<>())
                     .add(Map.of("ts", p.timestamp(), "value", p.value()));
         }
         List<Map<String, Object>> metrics = series.entrySet().stream()
@@ -306,30 +307,15 @@ public class SessionController {
 
     private SessionDetail toSessionDetail(
             SessionRow row,
-            java.util.Map<String, ModelStat> models,
-            java.util.Map<String, ToolStat> tools,
-            java.util.Map<String, String> resource) {
-        long total = row.inputTokens() + row.outputTokens() + row.cacheTokens();
+            Map<String, ModelStat> models,
+            Map<String, ToolStat> tools,
+            Map<String, String> resource) {
+        Session s = toSession(row);
         return new SessionDetail(
-                row.sessionId(),
-                row.agentId().isEmpty()   ? null : row.agentId(),
-                row.orgId().isEmpty()     ? null : row.orgId(),
-                row.startedAt(),
-                row.endedAt(),
-                row.durationMs() <= 0    ? null : row.durationMs(),
-                row.status(),
-                row.primaryModel(),
-                row.spanCount(),
-                row.llmCalls(),
-                row.toolCalls(),
-                row.inputTokens(),
-                row.outputTokens(),
-                row.cacheTokens(),
-                total,
-                row.avgLlmLatencyMs(),
-                models,
-                tools,
-                resource);
+                s.sessionId(), s.agentId(), s.orgId(), s.startedAt(), s.endedAt(), s.durationMs(),
+                s.status(), s.primaryModel(), s.spanCount(), s.llmCalls(), s.toolCalls(),
+                s.inputTokens(), s.outputTokens(), s.cacheTokens(), s.totalTokens(), s.avgLlmLatencyMs(),
+                models, tools, resource);
     }
 
     private Span toSpan(SpanRow row, boolean canReadPrompts) {

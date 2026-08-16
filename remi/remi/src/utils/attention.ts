@@ -1,4 +1,11 @@
 import type { Analytics, Session, VersionStats } from "../types";
+import {
+  ERROR_RATE_REGRESSION_PP,
+  LATENCY_REGRESSION_PCT,
+  errorRateDeltaPp,
+  isRegression,
+  latencyDeltaPct,
+} from "../lib/regression";
 
 export type Severity = "err" | "warn" | "info";
 export type AttentionTarget = "versions" | "sessions" | "analytics" | "trace";
@@ -17,10 +24,8 @@ export interface AttentionItem {
   agent?: string;
 }
 
-// Thresholds are deliberately blunt — this list exists to say "look here", not
-// to be a statistical test. Tune by editing the constants, nothing else.
-const LATENCY_REGRESSION_PCT = 20;
-const ERROR_RATE_REGRESSION_PP = 1;
+// Regression thresholds live in lib/regression.ts (shared with the versions
+// page's per-agent verdict, so the two views can't disagree on what counts).
 const SLOW_P95_MS = 4000;
 const STALLED_AFTER_MS = 5 * 60_000;
 const MAX_ITEMS = 6;
@@ -61,12 +66,9 @@ export function deriveAttention(
 
   // 1. A newer release that is measurably worse than the one before it.
   for (const [latest, prev] of releasePairs(versions)) {
-    const latPct =
-      prev.avg_llm_latency_ms > 0
-        ? ((latest.avg_llm_latency_ms - prev.avg_llm_latency_ms) / prev.avg_llm_latency_ms) * 100
-        : 0;
-    const errPp = (latest.error_rate - prev.error_rate) * 100;
-    if (latPct < LATENCY_REGRESSION_PCT && errPp < ERROR_RATE_REGRESSION_PP) continue;
+    if (!isRegression(latest, prev)) continue;
+    const latPct = latencyDeltaPct(latest, prev);
+    const errPp = errorRateDeltaPp(latest, prev);
 
     const parts: string[] = [];
     if (latPct >= LATENCY_REGRESSION_PCT) parts.push(`avg latency +${latPct.toFixed(0)}%`);

@@ -173,6 +173,46 @@ Seeded keys for local evaluation — **rotate these before any real use**:
 The dashboard accepts `?key=<api-key>` to switch keys without a rebuild — handy
 for seeing exactly what a restricted key can and can't read.
 
+**Customer logins (hosted deployment).** For anyone other than you to open the
+dashboard, they need to sign in rather than carry a bearer key around. Caddy +
+oauth2-proxy already handle this — Google OAuth in front, the dashboard behind
+it, no login UI to build:
+
+```
+browser → Caddy (TLS, :443) → oauth2-proxy (Google OAuth) → backend/frontend
+```
+
+Unauthenticated requests get redirected to Google sign-in by Caddy before they
+ever reach the app; on success Caddy forwards the verified email to the backend
+over `X-Forwarded-Email`, authenticated by `PROXY_SHARED_SECRET` so it can't be
+forged. The backend maps that email to an org via `org_members` — that row (not
+the OAuth login) is the actual authorization check:
+
+```sql
+INSERT INTO org_members (email, org_id, scopes)
+VALUES ('someone@customer.com', 'acme', ARRAY['read:sessions','read:spans']);
+```
+
+To turn it on:
+
+1. In Google Cloud Console → APIs & Services → Credentials, create an OAuth
+   client (type: Web application) with redirect URI
+   `https://<your-domain>/oauth2/callback`.
+2. Set in `.env`: `REMI_DOMAIN`, `OAUTH2_CLIENT_ID`, `OAUTH2_CLIENT_SECRET`,
+   `PROXY_SHARED_SECRET` (`openssl rand -hex 32`), `OAUTH2_COOKIE_SECRET`
+   (`openssl rand -base64 32 | head -c 32 | base64`), and optionally
+   `OAUTH2_EMAIL_DOMAINS` to restrict who can even reach the login screen.
+3. `docker compose --profile prod up -d --build` — this additionally starts
+   `caddy` and `oauth2-proxy`, and Caddy auto-provisions TLS for `REMI_DOMAIN`.
+4. Verify the auth boundary itself rejects forged headers and admits real ones —
+   run from the host (backend's `3100` is loopback-only, deliberately not
+   reachable from outside):
+   `PROXY_SHARED_SECRET=<secret> MEMBER_EMAIL=<a seeded org_members email> ./scripts/check-auth.sh`.
+
+Bearer API keys keep working unmodified alongside this — SSO is additive, not
+a replacement, and it's what agents (which have no browser) keep using for
+ingest.
+
 ## 6. Try the bundled examples
 
 Five production-shaped LangChain/LangGraph agents (support, research, code

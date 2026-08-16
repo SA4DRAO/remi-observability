@@ -34,7 +34,6 @@ All config is read from `VITE_*` variables, which are **baked into the static bu
 |----------|---------|---------|
 | `VITE_API_URL` | `http://localhost:3100` on localhost, else same-origin (`""`) | Backend base URL |
 | `VITE_API_KEY` | `dev-key` | Fallback bearer token (see key resolution below) |
-| `VITE_ENV` | `development` | `development` / `production` / `staging` |
 | `VITE_ENABLE_DEBUG` | `false` | Enables verbose frontend logging |
 
 In Docker, these are passed as build args (see root `docker-compose.yml`). The `serve` process at runtime does NOT use them.

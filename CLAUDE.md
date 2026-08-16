@@ -82,6 +82,25 @@ Dashboard :3000 → Spring :3100 /api/v1/* (org resolved from bearer key)
   (`OPENROUTER_API_KEY`, fallback `OPENAI_API_KEY`), persists verdicts to
   `remi.remi_span_analysis`, audit-logs prompt access. Prompt building lives in
   `JudgeService.buildJudgePrompt` (shared with the version sample-judge).
+- **Two ways in** (both resolve to the same `KeyContext`, so every query stays
+  org-scoped either way): a bearer **API key** (agents, CLI, the public demo
+  link's `?key=`), or a **proxy-authenticated user** — Caddy + oauth2-proxy
+  verify the email via SSO and forward it as `X-Forwarded-Email` alongside
+  `X-Remi-Proxy-Secret`; `ApiKeyFilter` trusts that email only when the secret
+  matches and maps it to an org via `org_members`. An unset `PROXY_SHARED_SECRET`
+  (the local default) disables the proxy path entirely rather than failing open,
+  and Caddy strips both headers off inbound requests before routing. Enable with
+  `docker compose --profile prod up -d`; verify with `scripts/check-auth.sh`.
+  The dashboard bundle therefore carries **no API key** on a hosted origin —
+  `VITE_API_KEY` is a localhost-only dev fallback (it ships inside the JS, so
+  anything else leaks it).
+- **Ingest limits**: `IngestController` reads the body itself (bounded
+  `readNBytes`, 4MB → 413) rather than via `@RequestBody`, so an oversized
+  payload never reaches the heap; `ApiKeyFilter` applies a fixed-window per-org
+  cap (`RATE_LIMIT_PER_MINUTE`, default 600, 0 disables) across read + ingest.
+  Both are crash protection, not billing quotas — and the rate limiter is
+  in-memory, so it counts per backend instance and needs Redis to survive
+  a second replica.
 - **Scopes**: `admin`, `read:sessions`, `read:spans`, `read:prompts`,
   `write:sessions`. Prompt/response attributes are redacted from API responses
   unless the key has `read:prompts` (reads are audit-logged in Postgres).
@@ -147,6 +166,18 @@ docker compose build backend
 ./scripts/benchmark.sh clean    # drops the bench partitions (2026-05-*)
 ```
 
+### Checks (closest thing to a test suite)
+```bash
+PROXY_SHARED_SECRET=<secret> MEMBER_EMAIL=<seeded org_members email> ./scripts/check-auth.sh
+./scripts/backup-db.sh                                 # pg_dump, verify it restores, prune
+```
+`check-auth.sh` hits the backend directly on :3100 rather than through Caddy — the
+point is that the backend rejects a forged `X-Forwarded-Email` itself, not merely
+that the proxy strips it. `backup-db.sh` restores every dump into a scratch
+database and compares row counts, because an unrestored backup is a guess; dumps
+land in `backups/` (gitignored — they contain key hashes and the audit chain).
+Cron it daily: `0 4 * * * cd /path/to/Remi && ./scripts/backup-db.sh >> backups/backup.log 2>&1`
+
 ### Frontend (`remi/remi/`)
 ```bash
 bun install
@@ -170,9 +201,11 @@ direct OpenAI. Full launch env + gotchas: `examples/CLAUDE.md`.
 ## Key Constraints
 
 - **No automated test suites** — `remi-backend-spring/src/test` is empty; frontend
-  and examples have no test runner. Closest checks: `bun run type-check` (frontend)
-  and `scripts/benchmark.sh` (query perf). Verify pipeline changes against live
-  ClickHouse span/session counts, not a green test run.
+  and examples have no test runner. Closest checks: `bun run type-check` (frontend),
+  `scripts/benchmark.sh` (query perf), `scripts/check-auth.sh` (auth boundary +
+  ingest limits) and `scripts/backup-db.sh` (restorable backup). All four run
+  against the live stack. Verify pipeline changes against live ClickHouse
+  span/session counts, not a green test run.
 - `VITE_*` env vars are baked into the frontend bundle at build time (compose build args).
 - The collector's host port 4318 is loopback-only; external ingest must use the
   backend proxy so the org key is enforced.

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, Gavel, Loader2 } from "lucide-react";
 import { useSampleJudge, useVersionComparison } from "../hooks/useAnalytics";
+import { isImprovement, isRegression } from "../lib/regression";
 import { formatBytes, formatLatency } from "../utils/format";
 import { Skeleton } from "./ui/skeleton";
 import { dateFrom, type Scope } from "../lib/scope";
@@ -56,16 +57,15 @@ function Delta({ value, baseline, lowerIsBetter, mode }: DeltaProps) {
   );
 }
 
-/** One-line summary of the newest release against the chosen baseline. */
+/**
+ * One-line summary of the newest release against the chosen baseline. Same
+ * thresholds as the overview's attention list (lib/regression.ts) — this is
+ * just that verdict rendered per-agent instead of surfaced org-wide.
+ */
 function verdictFor(latest: VersionStats, baseline: VersionStats): { text: string; color: string } {
   if (latest.version === baseline.version) return { text: "baseline only", color: "var(--muted-foreground)" };
-  const latPct =
-    baseline.avg_llm_latency_ms > 0
-      ? ((latest.avg_llm_latency_ms - baseline.avg_llm_latency_ms) / baseline.avg_llm_latency_ms) * 100
-      : 0;
-  const errPp = (latest.error_rate - baseline.error_rate) * 100;
-  if (latPct > 10 || errPp > 1) return { text: `${latest.version} regressed`, color: "var(--err)" };
-  if (latPct < -10 || errPp < -1) return { text: `${latest.version} improved`, color: "var(--ok)" };
+  if (isRegression(latest, baseline)) return { text: `${latest.version} regressed`, color: "var(--err)" };
+  if (isImprovement(latest, baseline)) return { text: `${latest.version} improved`, color: "var(--ok)" };
   return { text: `${latest.version} on par`, color: "var(--muted-foreground)" };
 }
 

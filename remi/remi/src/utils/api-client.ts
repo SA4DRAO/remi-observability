@@ -18,7 +18,11 @@ class ApiClient {
       baseURL,
       timeout,
       withCredentials: false,
-      headers: { 'Authorization': `Bearer ${apiKey}` },
+      // No key when the reverse proxy authenticates the user: the session cookie
+      // rides along on these same-origin calls and the backend reads the email
+      // the proxy forwards. Sending "Bearer " with an empty key would be treated
+      // as a bad credential rather than as absent one.
+      headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {},
     });
 
     // Request logging

@@ -8,7 +8,6 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:3100}
         VITE_API_KEY: ${REMI_API_KEY:-test-key-123}
-        VITE_ENV: development
         VITE_ENABLE_DEBUG: "true"
     ports:
       - "3000:3000"

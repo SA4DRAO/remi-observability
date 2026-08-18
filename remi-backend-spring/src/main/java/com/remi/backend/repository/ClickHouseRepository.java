@@ -550,14 +550,14 @@ public class ClickHouseRepository {
                 sideParams);
 
         Map<String, Map<String, Object>> judgeByKey = new HashMap<>();
-        for (var r : judgeRows) judgeByKey.put(r.get("agent") + "\0" + r.get("version"), r);
+        for (var r : judgeRows) judgeByKey.put(agentVersionKey(r), r);
         Map<String, Map<String, Object>> sysByKey = new HashMap<>();
-        for (var r : sysRows) sysByKey.put(r.get("agent") + "\0" + r.get("version"), r);
+        for (var r : sysRows) sysByKey.put(agentVersionKey(r), r);
 
         return rows.stream().map(r -> {
             long sessions = toLong(r.get("sessions"));
             long errorSessions = toLong(r.get("error_sessions"));
-            String key = r.get("agent") + "\0" + r.get("version");
+            String key = agentVersionKey(r);
             var judge = judgeByKey.get(key);
             var sys = sysByKey.get(key);
             Double cpu = sys != null ? toFiniteDouble(sys.get("avg_cpu_pct")) : null;
@@ -823,6 +823,11 @@ public class ClickHouseRepository {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
+
+    /** (agent, version) row identity for joining the judge/system-metrics side queries by hand. */
+    private static String agentVersionKey(Map<String, Object> row) {
+        return row.get("agent") + "\0" + row.get("version");
+    }
 
     private String buildScopeWhere(
             MapSqlParameterSource params,

@@ -14,10 +14,12 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +43,7 @@ logging.basicConfig(
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BASE_URL = os.getenv("OPENAI_BASE_URL")  # None → api.openai.com
+EXA_API_KEY = os.getenv("EXA_API_KEY")
 
 SYSTEM_PROMPT = """\
 You are a research assistant with access to a local knowledge base.
@@ -80,32 +83,6 @@ _DEFINITIONS: dict[str, str] = {
     ),
 }
 
-_PAPERS: dict[str, list[dict[str, Any]]] = {
-    "transformer": [
-        {"title": "Attention Is All You Need", "year": 2017, "citations": 80000},
-    ],
-    "rag": [
-        {
-            "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
-            "year": 2020,
-            "citations": 5200,
-        },
-    ],
-    "observability": [
-        {
-            "title": "Dapper: a Large-Scale Distributed Systems Tracing Infrastructure",
-            "year": 2010,
-            "citations": 3100,
-        },
-    ],
-    "llm": [
-        {"title": "Language Models are Few-Shot Learners (GPT-3)", "year": 2020, "citations": 22000},
-    ],
-    "react": [
-        {"title": "ReAct: Synergizing Reasoning and Acting in Language Models", "year": 2022, "citations": 1800},
-    ],
-}
-
 _MODEL_BENCHMARKS: dict[str, dict[str, Any]] = {
     "gpt-4o-mini": {"mmlu": 82.0, "context_window": 128_000, "cost_per_1m_input_tokens": 0.15},
     "gpt-4o": {"mmlu": 88.7, "context_window": 128_000, "cost_per_1m_input_tokens": 2.50},
@@ -134,17 +111,24 @@ def get_definition(term: str) -> dict[str, Any]:
 
 @tool
 def search_papers(topic: str) -> dict[str, Any]:
-    """Search for academic papers on a topic (e.g. 'transformer', 'rag', 'react')."""
-    time.sleep(0.4)
+    """Search the web for papers/articles on a topic (e.g. 'transformer', 'rag', 'react agents')."""
     maybe_fail_tool_call("search_papers")
-    key = topic.lower().strip()
-    papers = _PAPERS.get(key, [])
-    return {
-        "found": bool(papers),
-        "topic": topic,
-        "count": len(papers),
-        "papers": papers,
-    }
+    if not EXA_API_KEY:
+        return {"found": False, "topic": topic, "error": "EXA_API_KEY not set"}
+    req = urllib.request.Request(
+        "https://api.exa.ai/search",
+        data=json.dumps(
+            {"query": topic, "type": "auto", "numResults": 5, "contents": {"highlights": True}}
+        ).encode(),
+        headers={"x-api-key": EXA_API_KEY, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        results = json.load(resp).get("results", [])
+    papers = [
+        {"title": r.get("title"), "url": r.get("url"), "highlights": r.get("highlights")}
+        for r in results
+    ]
+    return {"found": bool(papers), "topic": topic, "count": len(papers), "papers": papers}
 
 
 @tool

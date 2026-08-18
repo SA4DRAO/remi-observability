@@ -103,6 +103,20 @@ CREATE TABLE IF NOT EXISTS pii_policies (
 );
 
 -- ---------------------------------------------------------------------------
+-- 5. org_members — who may open the dashboard, and as which org.
+-- The reverse proxy verifies the email via SSO; this table is the authorization
+-- half. No passwords here by design — the identity provider owns credentials.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS org_members (
+    email      TEXT        PRIMARY KEY,
+    org_id     TEXT        NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+    scopes     TEXT[]      NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_members_org ON org_members(org_id);
+
+-- ---------------------------------------------------------------------------
 -- Dev seed (idempotent)
 -- API key: "test-key-123"  →  hash stored, raw key never persisted
 -- ---------------------------------------------------------------------------
@@ -174,6 +188,14 @@ VALUES
      ARRAY['admin', 'read:sessions', 'read:spans', 'read:prompts', 'write:sessions'],
      'system')
 ON CONFLICT (key_id) DO NOTHING;
+
+-- Dashboard login for the sample org. Add one row per person you let in; the SSO
+-- provider proves the email, this row grants the org and scopes. Replace the
+-- placeholder below with your own email before relying on SSO login locally.
+INSERT INTO org_members (email, org_id, scopes)
+VALUES ('you@example.com', 'acme',
+        ARRAY['admin', 'read:sessions', 'read:spans', 'read:prompts', 'write:sessions'])
+ON CONFLICT (email) DO NOTHING;
 
 INSERT INTO pii_policies (org_id, rules)
 VALUES (

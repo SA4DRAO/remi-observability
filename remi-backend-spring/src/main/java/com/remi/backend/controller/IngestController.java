@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestClient;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.Set;
 
@@ -28,6 +29,10 @@ public class IngestController {
     private static final Logger log = LoggerFactory.getLogger(IngestController.class);
     private static final Set<String> SIGNALS = Set.of("traces", "metrics", "logs");
 
+    // ponytail: a default OTLP batch (512 spans) is tens of KB even with full prompts,
+    // so 4MB is generous. Raise it if a legitimate exporter ever trips the 413.
+    private static final int MAX_BODY_BYTES = 4 * 1024 * 1024;
+
     private final RestClient collector;
 
     public IngestController(@Value("${remi.collector-endpoint}") String collectorEndpoint) {
@@ -38,8 +43,8 @@ public class IngestController {
     public ResponseEntity<?> ingest(
             HttpServletRequest req,
             @PathVariable String signal,
-            @RequestHeader(value = "Content-Type", defaultValue = "application/x-protobuf") String contentType,
-            @RequestBody byte[] body) {
+            @RequestHeader(value = "Content-Type", defaultValue = "application/x-protobuf") String contentType)
+            throws IOException {
 
         if (!SIGNALS.contains(signal)) {
             return ResponseEntity.status(404).body(Map.of("success", false, "error", "Unknown signal"));
@@ -47,6 +52,17 @@ public class IngestController {
         KeyContext ctx = KeyContext.of(req);
         if (!ctx.hasScope("write:sessions")) {
             return ResponseEntity.status(403).body(Map.of("success", false, "error", "Key lacks write:sessions scope"));
+        }
+
+        // Read the body ourselves rather than via @RequestBody so an oversized payload
+        // is refused instead of being materialised into the heap first. readNBytes
+        // caps chunked uploads too, where Content-Length would have been absent.
+        byte[] body = req.getInputStream().readNBytes(MAX_BODY_BYTES + 1);
+        if (body.length > MAX_BODY_BYTES) {
+            log.warn("Rejected oversized {} payload from org {}", signal, ctx.orgId());
+            return ResponseEntity.status(413).body(Map.of(
+                    "success", false,
+                    "error", "Payload exceeds " + (MAX_BODY_BYTES / (1024 * 1024)) + "MB; lower OTEL_BSP_MAX_EXPORT_BATCH_SIZE"));
         }
 
         try {

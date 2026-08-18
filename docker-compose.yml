@@ -3,11 +3,12 @@ services:
     image: docker.io/library/postgres:16-alpine
     container_name: postgres-primary
     environment:
-      POSTGRES_USER: remi_user
-      POSTGRES_PASSWORD: remi_password
-      POSTGRES_DB: remi_db
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-remi_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-remi_password}
+      POSTGRES_DB: ${POSTGRES_DB:-remi_db}
+    # No host port: nothing outside the compose network needs Postgres, and
+    # publishing 5432 put the identity store on the box's public interface.
+    # Admin access is `docker exec -it postgres-primary psql -U remi_user -d remi_db`.
     volumes:
       - postgres_primary_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
@@ -25,13 +26,13 @@ services:
     image: docker.io/clickhouse/clickhouse-server:24.6-alpine
     container_name: clickhouse
     environment:
-      CLICKHOUSE_DB: remi
-      CLICKHOUSE_USER: remi_user
-      CLICKHOUSE_PASSWORD: remi_password
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-remi}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-remi_user}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-remi_password}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    ports:
-      - "8123:8123"   # HTTP interface (used by backend)
-      - "9000:9000"   # Native TCP (used by OTel Collector)
+    # No host ports: the backend (8123) and collector (9000) reach ClickHouse over
+    # the compose network. Published, they exposed every org's prompts unauthenticated
+    # to anyone who could reach the host. Use `docker exec -it clickhouse clickhouse-client`.
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -55,20 +56,29 @@ services:
       dockerfile: Dockerfile
     container_name: remi-backend
     ports:
-      - "3100:3100"
+      # Loopback only, same reasoning as otel-collector below: in --profile prod,
+      # Caddy is the only intended way in (it reaches this container over
+      # remi-network by service name, which host port binding doesn't affect).
+      # A 0.0.0.0 bind here would be one open cloud firewall rule away from
+      # letting anyone skip Caddy + oauth2-proxy entirely.
+      - "127.0.0.1:3100:3100"
     environment:
       CORS_ORIGINS: "http://localhost:3000,http://localhost:5173,http://frontend:3000"
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
-      CLICKHOUSE_USER: remi_user
-      CLICKHOUSE_PASSWORD: remi_password
-      CLICKHOUSE_DB: remi
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-remi_user}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-remi_password}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-remi}
       POSTGRES_HOST: postgres-primary
       POSTGRES_PORT: 5432
-      POSTGRES_DB: remi_db
-      POSTGRES_USER: remi_user
-      POSTGRES_PASSWORD: remi_password
+      POSTGRES_DB: ${POSTGRES_DB:-remi_db}
+      POSTGRES_USER: ${POSTGRES_USER:-remi_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-remi_password}
       COLLECTOR_ENDPOINT: http://otel-collector:4318
+      # Empty locally: proxy-user auth stays off and the bearer key is the only
+      # way in. Set (with Caddy in front) to enable SSO dashboard logins.
+      PROXY_SHARED_SECRET: ${PROXY_SHARED_SECRET:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-600}
       # LLM-as-judge (OpenRouter; falls back to OPENAI_API_KEY if unset)
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -94,11 +104,12 @@ services:
         VITE_API_URL: "${VITE_API_URL:-}"
         # Dashboard key for the sample org (seeded in init-db.sql, dev only)
         VITE_API_KEY: ${REMI_API_KEY:-acme-admin-key}
-        VITE_ENV: development
         VITE_ENABLE_DEBUG: "true"
     container_name: remi-frontend
     ports:
-      - "3000:3000"
+      # Loopback only — see the backend service's port comment above. Caddy
+      # reaches this container by service name over remi-network regardless.
+      - "127.0.0.1:3000:3000"
     environment:
       NODE_ENV: production
     depends_on:
@@ -133,9 +144,67 @@ services:
       REMI_ORG_ID: demo-org
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
       FEED_INTERVAL: ${FEED_INTERVAL:-900}
     depends_on:
       - backend
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  # ── Hosted deployment only (profile: prod) ──────────────────────────────────
+  # `docker compose --profile prod up -d`. Without the profile the local stack is
+  # unchanged and unauthenticated, exactly as before.
+  #
+  # Caddy terminates TLS (auto-cert for REMI_DOMAIN), routes /v1/* straight to the
+  # backend for agent ingest, and gates everything else behind oauth2-proxy.
+  caddy:
+    image: docker.io/library/caddy:2-alpine
+    container_name: remi-caddy
+    profiles: [prod]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Both required in .env for the prod profile; unset, Caddy refuses to start
+      # and an empty secret means the backend rejects every login. Never silent.
+      # Generate the secret with: openssl rand -hex 32
+      REMI_DOMAIN: ${REMI_DOMAIN:-}
+      PROXY_SHARED_SECRET: ${PROXY_SHARED_SECRET:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - oauth2-proxy
+      - backend
+      - frontend
+    restart: unless-stopped
+    networks:
+      - remi-network
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    container_name: remi-oauth2-proxy
+    profiles: [prod]
+    command:
+      # Caddy routes traffic; oauth2-proxy only answers /oauth2/* and the auth probe.
+      - --upstream=static://202
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      - --set-xauthrequest=true
+      - --skip-provider-button=true
+    environment:
+      OAUTH2_PROXY_PROVIDER: ${OAUTH2_PROVIDER:-google}
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_CLIENT_ID:-}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET:-}
+      # Generate with: openssl rand -base64 32 | head -c 32 | base64
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_COOKIE_SECRET:-}
+      OAUTH2_PROXY_REDIRECT_URL: "https://${REMI_DOMAIN}/oauth2/callback"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      # Who may reach the login at all. Membership in org_members is the real
+      # authorization check — this only narrows who can start a session.
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${OAUTH2_EMAIL_DOMAINS:-*}
     restart: unless-stopped
     networks:
       - remi-network
@@ -158,8 +227,8 @@ services:
     container_name: otel-collector
     command: ["--config=/etc/otelcol-contrib/otel-collector-config.yaml"]
     environment:
-      CLICKHOUSE_USER: remi_user
-      CLICKHOUSE_PASSWORD: remi_password
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-remi_user}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-remi_password}
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol-contrib/otel-collector-config.yaml:ro
     ports:
@@ -183,3 +252,5 @@ networks:
 volumes:
   postgres_primary_data:
   clickhouse_data:
+  caddy_data:
+  caddy_config:

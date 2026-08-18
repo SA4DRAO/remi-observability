@@ -82,30 +82,9 @@ public class AdminController {
     }
 
     // ── Orgs ────────────────────────────────────────────────────────────────────
-    // ponytail: any admin key can create orgs; gate behind a platform-admin role
-    // if this ever runs multi-customer.
-
-    @GetMapping("/orgs")
-    public ResponseEntity<?> listOrgs(HttpServletRequest req) {
-        KeyContext ctx = KeyContext.of(req);
-        if (!ctx.isAdmin()) return forbidden();
-        return ResponseEntity.ok(ApiResponse.ok(identity.listOrgs()));
-    }
-
-    public record CreateOrgRequest(String orgId, String name, String plan) {}
-
-    @PostMapping("/orgs")
-    public ResponseEntity<?> createOrg(HttpServletRequest req, @RequestBody CreateOrgRequest body) {
-        KeyContext ctx = KeyContext.of(req);
-        if (!ctx.isAdmin()) return forbidden();
-        if (body.orgId() == null || body.orgId().isBlank() || body.name() == null || body.name().isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("success", false, "error", "org_id and name are required"));
-        }
-        String plan = body.plan() != null ? body.plan() : "starter";
-        identity.createOrg(body.orgId().trim(), body.name().trim(), plan);
-        identity.audit(ctx.orgId(), ctx.keyId(), "create:org", "org", body.orgId());
-        return ResponseEntity.status(201).body(ApiResponse.ok(Map.of("org_id", body.orgId())));
-    }
+    // ponytail: GET/POST /orgs deleted — a per-org admin key could list and create
+    // every tenant, and nothing called them. Org provisioning is a psql INSERT
+    // until self-serve signup exists; add a platform-admin scope then.
 
     // ── PII policy ──────────────────────────────────────────────────────────────
 

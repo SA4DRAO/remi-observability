@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Moon, Sun } from "lucide-react";
+import { DEMO_MODE, demoGeneratedAt } from "./utils/demo-data";
 import { AnalyticsPage } from "./components/Pages/AnalyticsPage";
 import { OverviewPage } from "./components/Pages/OverviewPage";
 import { SessionsPage } from "./components/Pages/SessionsPage";
@@ -35,6 +36,38 @@ function Logo() {
     >
       <path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />
     </svg>
+  );
+}
+
+/** Static-snapshot notice. Says what is and isn't real so nobody mistakes the
+ *  frozen data for a live system, and points at the repo for running it. */
+function DemoBanner() {
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    demoGeneratedAt().then(setGeneratedAt).catch(() => setGeneratedAt(null));
+  }, []);
+
+  return (
+    <div className="border-b bg-subtle">
+      <div className="shell flex h-8 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+        <span className="chip" style={{ borderColor: "var(--info)", color: "var(--info)" }}>
+          demo
+        </span>
+        <span className="text-muted-foreground">
+          Static snapshot of a real Remi instance
+          {generatedAt ? ` captured ${generatedAt}` : ""} — every view is live, the data is frozen.
+        </span>
+        <a
+          className="ml-auto underline underline-offset-2 hover:text-foreground"
+          href="https://github.com/SA4DRAO/remi-observability"
+          rel="noreferrer"
+          target="_blank"
+        >
+          Run it yourself →
+        </a>
+      </div>
+    </div>
   );
 }
 
@@ -130,6 +163,8 @@ function App() {
           </div>
         </div>
       </header>
+
+      {DEMO_MODE && <DemoBanner />}
 
       {!isTrace && (
         <ScopeBar

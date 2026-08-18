@@ -117,6 +117,64 @@ Without it, each trace is its own session.
 | Agent runs but nothing appears | You ran `python agent.py` instead of `opentelemetry-instrument python agent.py`. |
 | Spans appear, session says "running" | Normal until the root span closes; multi-turn threads read complete between turns. |
 
+### Let an AI agent bring up the stack
+
+Bringing Remi up is a handful of shell steps, so you can hand it to a coding
+agent instead of running them yourself. Copy the prompt below into Cursor,
+Claude Code, or any coding agent.
+
+It only starts Remi. It does **not** touch your agent's code, change how your
+agent is launched, or install anything beyond what Docker pulls — instrumenting
+your agent stays a decision you make, using the env vars from
+[§3](#3-send-your-own-agents-traces).
+
+````text
+Bring up Remi, a self-hosted LLM observability stack. Read these constraints first.
+
+SCOPE — this task is ONLY to get the stack running:
+  - Do NOT modify, instrument, or even open any of my application/agent code.
+  - Do NOT change how any of my services are launched or built.
+  - Do NOT install anything on my machine. Docker pulls its own images; that is
+    the only thing that should land here. No pip/npm/brew/apt installs.
+  - If a prerequisite is missing, STOP and tell me. Do not install it for me.
+  - Work in a new directory, not inside any existing project of mine.
+
+STEPS
+
+1. Confirm Docker and Docker Compose are installed and the daemon is running:
+       docker --version && docker compose version && docker info
+   If any of those fail, stop and tell me what is missing. Remi needs roughly
+   4 GB of free RAM.
+
+2. Clone and start:
+       git clone https://github.com/SA4DRAO/remi-observability.git
+       cd remi-observability
+       cp .env.example .env
+       docker compose up -d --build
+   The first build takes a few minutes.
+
+3. Verify it came up:
+       curl http://localhost:3100/api/v1/health    # expect {"status":"ok",...}
+       docker compose ps                           # expect every service Up
+   Confirm the dashboard responds at http://localhost:3000.
+
+4. If anything failed, show me the relevant logs (docker compose logs <service>)
+   and stop. Do not attempt fixes that install software or edit files outside
+   the cloned repo.
+
+THEN REPORT BACK, without acting on any of it:
+  - Whether the stack is up, and the dashboard URL.
+  - That .env can optionally take an OPENROUTER_API_KEY or OPENAI_API_KEY, which
+    is needed ONLY for the LLM-as-judge feature and the bundled example agents —
+    trace ingest works fine without one.
+  - That a demo-feeder service is running example agents continuously against a
+    demo org so the dashboard is not empty, that it consumes that LLM key, and
+    that `docker compose stop demo-feeder` turns it off without affecting
+    anything else.
+  - The exact env vars I would set on my own agent when I choose to instrument
+    it, quoted verbatim from the repo README section "3. Send your own agent's
+    traces" — as information for me to apply myself, not something you apply.
+````
 ## 4. What to look at
 
 | Page | What it shows |
@@ -172,6 +230,46 @@ Seeded keys for local evaluation — **rotate these before any real use**:
 
 The dashboard accepts `?key=<api-key>` to switch keys without a rebuild — handy
 for seeing exactly what a restricted key can and can't read.
+
+**Customer logins (hosted deployment).** For anyone other than you to open the
+dashboard, they need to sign in rather than carry a bearer key around. Caddy +
+oauth2-proxy already handle this — Google OAuth in front, the dashboard behind
+it, no login UI to build:
+
+```
+browser → Caddy (TLS, :443) → oauth2-proxy (Google OAuth) → backend/frontend
+```
+
+Unauthenticated requests get redirected to Google sign-in by Caddy before they
+ever reach the app; on success Caddy forwards the verified email to the backend
+over `X-Forwarded-Email`, authenticated by `PROXY_SHARED_SECRET` so it can't be
+forged. The backend maps that email to an org via `org_members` — that row (not
+the OAuth login) is the actual authorization check:
+
+```sql
+INSERT INTO org_members (email, org_id, scopes)
+VALUES ('someone@customer.com', 'acme', ARRAY['read:sessions','read:spans']);
+```
+
+To turn it on:
+
+1. In Google Cloud Console → APIs & Services → Credentials, create an OAuth
+   client (type: Web application) with redirect URI
+   `https://<your-domain>/oauth2/callback`.
+2. Set in `.env`: `REMI_DOMAIN`, `OAUTH2_CLIENT_ID`, `OAUTH2_CLIENT_SECRET`,
+   `PROXY_SHARED_SECRET` (`openssl rand -hex 32`), `OAUTH2_COOKIE_SECRET`
+   (`openssl rand -base64 32 | head -c 32 | base64`), and optionally
+   `OAUTH2_EMAIL_DOMAINS` to restrict who can even reach the login screen.
+3. `docker compose --profile prod up -d --build` — this additionally starts
+   `caddy` and `oauth2-proxy`, and Caddy auto-provisions TLS for `REMI_DOMAIN`.
+4. Verify the auth boundary itself rejects forged headers and admits real ones —
+   run from the host (backend's `3100` is loopback-only, deliberately not
+   reachable from outside):
+   `PROXY_SHARED_SECRET=<secret> MEMBER_EMAIL=<a seeded org_members email> ./scripts/check-auth.sh`.
+
+Bearer API keys keep working unmodified alongside this — SSO is additive, not
+a replacement, and it's what agents (which have no browser) keep using for
+ingest.
 
 ## 6. Try the bundled examples
 

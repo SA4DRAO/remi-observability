@@ -6,12 +6,10 @@ WORKDIR /app
 # Supplied via docker-compose build.args or --build-arg.
 ARG VITE_API_URL=http://localhost:3100
 ARG VITE_API_KEY=test-key-123
-ARG VITE_ENV=development
 ARG VITE_ENABLE_DEBUG=false
 
 ENV VITE_API_URL=$VITE_API_URL \
     VITE_API_KEY=$VITE_API_KEY \
-    VITE_ENV=$VITE_ENV \
     VITE_ENABLE_DEBUG=$VITE_ENABLE_DEBUG
 
 COPY package.json bun.lock* ./
